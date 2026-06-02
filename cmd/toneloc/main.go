@@ -345,6 +345,17 @@ FLAGS:
 KEYS WHILE DIALING:
   ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait
   N/C/F/G/V/Y annotate the current number
+  M or TAB   switch between the Dialer and the ToneMap
+
+IN THE TONEMAP:
+  a grid of the whole scan coloured by result; hover with the mouse (or move
+  with the arrow keys / hjkl) and the cell's address + verdict show at the
+  bottom. M or TAB returns to the dialer.
+
+DATA FILES:
+  Results are saved to <DataFile>.DAT and reloaded on the next run, so an
+  interrupted scan resumes where it left off (already-dialed targets are
+  skipped). Autosaves every 15s and on exit.
 
 EXAMPLES:
   toneloc 192.168.1.X /p:22,80,443

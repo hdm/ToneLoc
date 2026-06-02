@@ -15,7 +15,7 @@ func TestFrameLayout(t *testing.T) {
 		t.Fatal(err)
 	}
 	job := engine.Job{
-		DataFile: "204_13_7.DAT", Mask: mask,
+		Mask:  mask,
 		Ports: []uint16{23, 80, 443}, WaitDelay: 200 * time.Millisecond,
 		MaxRings: 6, Seed: 1337, Backend: "sim",
 	}

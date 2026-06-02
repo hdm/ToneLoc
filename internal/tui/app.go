@@ -9,6 +9,8 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/hdm/toneloc/internal/dos"
@@ -28,6 +30,12 @@ const (
 	meterRow = 22
 	copyRow  = 23
 	statRow  = 24
+
+	// ToneMap grid: a dense block of cells (left) plus a legend (right),
+	// echoing the original TONEMAP.EXE layout.
+	tmGX, tmGY = 1, 2   // grid origin (col,row)
+	tmGW, tmGH = 54, 19 // grid size in cells
+	tmLegendX  = 57     // legend column
 )
 
 // App renders an engine.State to a dos.Screen and feeds keystrokes back to the
@@ -40,7 +48,28 @@ type App struct {
 	blink   bool
 	frame   int
 	scanCol int // copyright colour cycling, for that restless DOS feel
+
+	mode    viewMode
+	mouseOn bool
+
+	// ToneMap cursor (in grid-cell coordinates) and downsample cache.
+	curCol, curRow int
+	mapCells       []uint8
+	mapPerCell     int
+	mapAt          time.Time
+
+	// Input escape-sequence parser state (arrows + SGR mouse share ESC[).
+	escState int // 0 normal, 1 saw ESC, 2 collecting CSI
+	csiBuf   []byte
+	escTime  time.Time
 }
+
+type viewMode int
+
+const (
+	modeDialer viewMode = iota
+	modeToneMap
+)
 
 // New builds an App that draws to out.
 func New(eng *engine.Engine, out io.Writer) *App {
@@ -56,7 +85,10 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 
 	// Enter the alternate screen + clear, so we own the whole 80x25 canvas.
 	io.WriteString(a.out, "\x1b[?1049h\x1b[2J\x1b[H")
-	defer io.WriteString(a.out, "\x1b[0m\x1b[?25h\x1b[?1049l")
+	defer func() {
+		a.enableMouse(false)
+		io.WriteString(a.out, "\x1b[0m\x1b[?25h\x1b[?1049l")
+	}()
 
 	a.draw(a.eng.State().Snapshot())
 	a.scr.Flush(a.out)
@@ -74,10 +106,15 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 			if !ok {
 				return nil
 			}
-			if a.handleKey(b) {
+			if a.feed(b) {
 				a.eng.Quit()
 			}
 		case <-ticker.C:
+			// A lone ESC (not the start of an arrow/mouse sequence) means quit.
+			if a.escState == 1 && time.Since(a.escTime) > 80*time.Millisecond {
+				a.escState = 0
+				a.eng.Quit()
+			}
 			a.frame++
 			a.draw(a.eng.State().Snapshot())
 			a.scr.Flush(a.out)
@@ -85,11 +122,103 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 	}
 }
 
-// handleKey maps a keystroke to engine control. Returns true to quit.
-func (a *App) handleKey(b byte) bool {
+// feed pushes one input byte through the escape-sequence parser and returns
+// true if the program should quit.
+func (a *App) feed(b byte) bool {
+	switch a.escState {
+	case 2: // collecting a CSI / SS3 sequence
+		a.csiBuf = append(a.csiBuf, b)
+		if b >= 0x40 && b <= 0x7e { // final byte
+			a.dispatchCSI(a.csiBuf)
+			a.escState = 0
+		} else if len(a.csiBuf) > 32 { // runaway guard
+			a.escState = 0
+		}
+		return false
+	case 1: // saw ESC; is it a sequence or a lone ESC?
+		if b == '[' || b == 'O' {
+			a.escState = 2
+			a.csiBuf = a.csiBuf[:0]
+			return false
+		}
+		a.escState = 0
+		return true // ESC followed by a normal key -> treat as quit
+	default:
+		if b == 0x1b {
+			a.escState = 1
+			a.escTime = time.Now()
+			return false
+		}
+		return a.handleNormal(b)
+	}
+}
+
+// dispatchCSI handles a completed CSI sequence: arrow keys and SGR mouse events.
+func (a *App) dispatchCSI(buf []byte) {
+	if len(buf) == 1 {
+		switch buf[0] {
+		case 'A':
+			a.moveCursor(0, -1)
+		case 'B':
+			a.moveCursor(0, 1)
+		case 'C':
+			a.moveCursor(1, 0)
+		case 'D':
+			a.moveCursor(-1, 0)
+		}
+		return
+	}
+	if buf[0] == '<' { // SGR mouse: <btn;col;row(M|m)
+		a.handleMouse(buf)
+	}
+}
+
+func (a *App) handleMouse(buf []byte) {
+	// SGR mouse report body is "btn;col;row" between '<' and the final M/m.
+	body := string(buf[1 : len(buf)-1])
+	parts := strings.Split(body, ";")
+	if len(parts) != 3 {
+		return
+	}
+	col, e1 := strconv.Atoi(parts[1])
+	row, e2 := strconv.Atoi(parts[2])
+	if e1 != nil || e2 != nil {
+		return
+	}
+	// Terminal coords are 1-based; map onto the ToneMap grid.
+	a.hoverAt(col-1, row-1)
+}
+
+// handleNormal maps a plain keystroke to an action. Returns true to quit.
+func (a *App) handleNormal(b byte) bool {
 	switch b {
-	case 27, 'Q': // ESC / Q -- exit
+	case 'q', 'Q': // explicit quit
 		return true
+	case 'm', 'M', '\t': // toggle Dialer <-> ToneMap
+		if a.mode == modeDialer {
+			a.setMode(modeToneMap)
+		} else {
+			a.setMode(modeDialer)
+		}
+		return false
+	}
+
+	if a.mode == modeToneMap {
+		switch b {
+		case 'h':
+			a.moveCursor(-1, 0)
+		case 'l':
+			a.moveCursor(1, 0)
+		case 'k':
+			a.moveCursor(0, -1)
+		case 'j':
+			a.moveCursor(0, 1)
+		}
+		return false
+	}
+
+	// Dialer-mode controls.
+	switch b {
 	case ' ': // abort current dial
 		a.eng.Abort()
 	case 'p', 'P': // pause / resume toggle
@@ -99,11 +228,11 @@ func (a *App) handleKey(b byte) bool {
 			a.eng.Pause()
 		}
 		a.paused = !a.paused
-	case 's', 'S': // speaker toggle
+	case 's', 'S':
 		a.eng.Speaker()
-	case 'r', 'R': // redial current number
+	case 'r', 'R':
 		a.eng.Redial()
-	case 'x', 'X': // add 5s to wait this dial
+	case 'x', 'X':
 		a.eng.AddWait()
 	case 'n', 'N':
 		a.eng.Note("Noted")
@@ -121,6 +250,54 @@ func (a *App) handleKey(b byte) bool {
 	return false
 }
 
+func (a *App) setMode(m viewMode) {
+	a.mode = m
+	a.enableMouse(m == modeToneMap)
+}
+
+// enableMouse toggles xterm any-event mouse reporting in SGR mode, so hovering
+// the ToneMap streams motion events we can read off the same input channel.
+func (a *App) enableMouse(on bool) {
+	if a.out == nil || on == a.mouseOn {
+		return
+	}
+	a.mouseOn = on
+	if on {
+		io.WriteString(a.out, "\x1b[?1003h\x1b[?1006h")
+	} else {
+		io.WriteString(a.out, "\x1b[?1003l\x1b[?1006l")
+	}
+}
+
+func (a *App) moveCursor(dx, dy int) {
+	a.curCol = clamp(a.curCol+dx, 0, tmGW-1)
+	a.curRow = clamp(a.curRow+dy, 0, tmGH-1)
+}
+
+// hoverAt maps absolute screen coords to a ToneMap cell (if inside the grid).
+func (a *App) hoverAt(sx, sy int) {
+	if a.mode != modeToneMap {
+		return
+	}
+	cx := sx - tmGX
+	cy := sy - tmGY
+	if cx < 0 || cy < 0 || cx >= tmGW || cy >= tmGH {
+		return
+	}
+	a.curCol = cx
+	a.curRow = cy
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
 // Frame draws the current engine state and returns it as plain text. Handy for
 // tests and for previewing the layout without a terminal.
 func (a *App) Frame() string {
@@ -128,8 +305,18 @@ func (a *App) Frame() string {
 	return a.scr.Plain()
 }
 
+// FrameSVG draws the current state and returns it as a standalone SVG image.
+func (a *App) FrameSVG() string {
+	a.draw(a.eng.State().Snapshot())
+	return a.scr.SVG()
+}
+
 func (a *App) draw(v engine.StateView) {
 	a.blink = (a.frame/10)%2 == 0
+	if a.mode == modeToneMap {
+		a.drawToneMap(v)
+		return
+	}
 	s := a.scr
 	s.Clear(dos.Attr(dos.LightGray, dos.Black))
 

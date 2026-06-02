@@ -8,6 +8,7 @@ package dos
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"strconv"
 	"unicode/utf8"
@@ -172,6 +173,72 @@ func (s *Screen) Plain() string {
 		b.WriteByte('\n')
 	}
 	return b.String()
+}
+
+// SVG renders the current screen as a standalone SVG image, faithful to the
+// VGA text-mode palette and cell grid. Handy for documentation and for showing
+// off the look without a terminal. Blinking cells are drawn solid.
+func (s *Screen) SVG() string {
+	const cw, ch = 10, 20 // cell box in px
+	const fs = 16         // font size
+	w, h := s.W*cw, s.H*ch
+
+	var b bytes.Buffer
+	fmt.Fprintf(&b, `<svg xmlns="http://www.w3.org/2000/svg" width="%d" height="%d" viewBox="0 0 %d %d" font-family="DejaVu Sans Mono, Consolas, Menlo, monospace" font-size="%d">`, w, h, w, h, fs)
+	// Black backdrop.
+	fmt.Fprintf(&b, `<rect width="%d" height="%d" fill="#000000"/>`, w, h)
+
+	// Background rectangles: coalesce horizontal runs of the same non-black bg.
+	for y := 0; y < s.H; y++ {
+		x := 0
+		for x < s.W {
+			bg := attrBG(s.cur[y*s.W+x].attr)
+			if bg == Black {
+				x++
+				continue
+			}
+			run := 1
+			for x+run < s.W && attrBG(s.cur[y*s.W+x+run].attr) == bg {
+				run++
+			}
+			fmt.Fprintf(&b, `<rect x="%d" y="%d" width="%d" height="%d" fill="%s"/>`,
+				x*cw, y*ch, run*cw, ch, hexColor(bg))
+			x += run
+		}
+	}
+
+	// Glyphs: one <text> per non-space cell, centred in its box.
+	for y := 0; y < s.H; y++ {
+		for x := 0; x < s.W; x++ {
+			c := s.cur[y*s.W+x]
+			if c.ch == ' ' || c.ch == 0 {
+				continue
+			}
+			fg := attrFG(c.attr) & 0x0F
+			fmt.Fprintf(&b, `<text x="%d" y="%d" fill="%s" text-anchor="middle">%s</text>`,
+				x*cw+cw/2, y*ch+fs-2, hexColor(fg), escapeXML(c.ch))
+		}
+	}
+	b.WriteString(`</svg>`)
+	return b.String()
+}
+
+func hexColor(c int) string {
+	rgb := dosRGB[c&0x0F]
+	return fmt.Sprintf("#%02x%02x%02x", rgb[0], rgb[1], rgb[2])
+}
+
+func escapeXML(r rune) string {
+	switch r {
+	case '&':
+		return "&amp;"
+	case '<':
+		return "&lt;"
+	case '>':
+		return "&gt;"
+	default:
+		return string(r)
+	}
 }
 
 // Repaint forces the next Flush to redraw every cell (after a resize/clear).

@@ -35,6 +35,32 @@ const (
 // Found reports whether the response is something worth keeping (a hit).
 func (r Response) Found() bool { return r == RespTone || r == RespCarrier }
 
+// Priority orders responses for the ToneMap, where many targets (across ports)
+// collapse into one cell: the most interesting verdict wins. Carriers and tones
+// outrank everything; undialed loses to anything real.
+func (r Response) Priority() int {
+	switch r {
+	case RespCarrier:
+		return 9
+	case RespTone:
+		return 8
+	case RespVoice:
+		return 6
+	case RespBusy:
+		return 5
+	case RespNoDialtone:
+		return 4
+	case RespRingout:
+		return 3
+	case RespTimeout:
+		return 2
+	case RespExcluded, RespBlacklisted:
+		return 1
+	default: // Undialed, Aborted
+		return 0
+	}
+}
+
 // Tag is the short text rendered in the activity log, matching the flavour of
 // the original messages.
 func (r Response) Tag() string {

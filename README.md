@@ -100,7 +100,30 @@ random number twice" promise.
 ```
 ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait
 N/C/F/G/V/Y annotate the current number
+M or TAB   switch between the Dialer and the ToneMap
 ```
+
+### ToneMap
+
+Press **M** (or **Tab**) to flip from the dialer to the **ToneMap** — a homage to
+the original `TONEMAP.EXE`. It draws the entire scan space as a dense grid, one
+cell per address (auto-downsampled for big ranges), coloured by the most
+interesting verdict found there:
+
+```
+█ Carrier   █ Tone   ▓ Busy   ▓ Voice   ▒ No Dialtone   ▒ Ringout   ░ Timeout   · Undialed
+```
+
+A large arrow cursor follows your **mouse** (or the **arrow keys** / **hjkl**),
+and the address and verdict under it are shown at the bottom — mouse reporting
+works the same in a real terminal and in the ghostty.js web view.
+
+### Resuming scans (.DAT files)
+
+Like the original, results are written to a `<DataFile>.DAT` file and reloaded
+on the next run: already-dialed targets are skipped and the stats/ToneMap show
+the prior history, so you can stop and pick a scan back up. It autosaves every
+15 seconds and on exit.
 
 ## The web version (ghostty.js)
 
@@ -122,10 +145,12 @@ be reached, the page falls back to `xterm.js` automatically.)
 ```
 cmd/toneloc            CLI: ToneLoc-style /M /R /X /p args, raw-tty input, --web
 internal/engine        scan engine: IP masks, zmap-go iterator, response
-                       classification, the sim/connect/zmap backends, live stats
+                       classification, the sim/connect/zmap backends, live
+                       stats, the ToneMap grid, and .DAT persistence
 internal/dos           an 80x25, 16-colour MS-DOS text-mode renderer
-                       (CP437 box-drawing, blink, a diffing ANSI flusher)
-internal/tui           the 3-window ToneLoc layout + keyboard handling
+                       (CP437 box-drawing, blink, a diffing ANSI flusher, SVG)
+internal/tui           the 3-window dialer + the ToneMap view, keyboard and
+                       mouse handling (arrow/SGR-mouse escape parsing)
 internal/web           HTTP + WebSocket bridge to ghostty.js
 ```
 

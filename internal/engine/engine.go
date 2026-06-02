@@ -22,6 +22,10 @@ type Engine struct {
 	redial  bool
 	noteReq chan string
 	done    chan struct{}
+
+	dat      *DatFile
+	dirty    bool
+	lastSave time.Time
 }
 
 type control struct {
@@ -69,6 +73,8 @@ func New(ctx context.Context, job Job) (*Engine, error) {
 	st.Backend = job.Backend
 	st.MaskText = job.Mask.Text()
 	st.DataFile = job.DataFile
+	st.tone = make([]uint8, job.Mask.Span())
+	st.toneSpan = int(job.Mask.Span())
 	st.Stats.Max = dialer.Total()
 	if job.Range != nil {
 		st.Stats.Max = uint64(job.Range.Hi-job.Range.Lo+1) * uint64(len(job.Ports))
@@ -86,11 +92,65 @@ func New(ctx context.Context, job Job) (*Engine, error) {
 	}
 
 	e.banner()
+
+	// Load any existing data file so an interrupted scan resumes where it left
+	// off, exactly like the original .DAT behaviour.
+	if path := datPathFor(job.DataFile); path != "" {
+		dat, err := LoadDat(path)
+		if err != nil {
+			e.logf("Could not read %s: %v", path, err)
+			dat = &DatFile{Path: path, Results: map[string]Result{}}
+		}
+		dat.Mask = job.Mask.Text()
+		dat.Ports = job.Ports
+		e.dat = dat
+		if n := len(dat.Results); n > 0 {
+			e.seedFromDat(dat)
+			e.logf("Loaded %d previous results from %s", n, job.DataFile)
+		}
+	}
+
 	e.probe = e.selectProbe(ctx)
 	st.ModemName = e.probe.Name()
 	e.logf("Modem: %s", e.probe.Name())
 	e.logf("Initializing modem ... Done")
 	return e, nil
+}
+
+// seedFromDat pre-populates the live stats and Found list from a loaded data
+// file, so a resumed scan shows its history rather than starting from zero.
+func (e *Engine) seedFromDat(dat *DatFile) {
+	e.state.mu.Lock()
+	defer e.state.mu.Unlock()
+	st := &e.state.Stats
+	for _, r := range dat.Results {
+		st.Dialed++
+		switch r.Response {
+		case RespCarrier:
+			st.Carriers++
+		case RespTone:
+			st.Tones++
+		case RespVoice:
+			st.Voice++
+		case RespBusy:
+			st.Busy++
+		case RespNoDialtone:
+			st.NoDialtone++
+		case RespRingout:
+			st.Ringout++
+		case RespTimeout:
+			st.Timeout++
+		}
+		if r.Response.Found() {
+			e.state.Found = append(e.state.Found, FoundEntry{Target: r.Target(), Resp: r.Response, When: dat.Updated})
+		}
+		if idx, ok := e.job.Mask.Index(r.Addr); ok {
+			e.state.markTone(int(idx), r.Response)
+		}
+	}
+	if len(e.state.Found) > 5 {
+		e.state.Found = e.state.Found[len(e.state.Found)-5:]
+	}
 }
 
 func (e *Engine) selectProbe(ctx context.Context) Probe {
@@ -112,6 +172,12 @@ func (e *Engine) selectProbe(ctx context.Context) Probe {
 
 // State exposes the shared render state.
 func (e *Engine) State() *State { return e.state }
+
+// Mask is the address space being scanned (for the ToneMap to label cells).
+func (e *Engine) Mask() *Mask { return e.job.Mask }
+
+// Span is the number of addresses in the scan.
+func (e *Engine) Span() uint32 { return e.job.Mask.Span() }
 
 // Done is closed when the scan loop exits.
 func (e *Engine) Done() <-chan struct{} { return e.done }
@@ -192,6 +258,9 @@ func (e *Engine) Run(ctx context.Context) {
 		if e.job.excluded(tgt.addr) {
 			continue // /X excluded -- silently skip, like the original
 		}
+		if pending == nil && e.dat != nil && e.dat.Has(tgt.addr.String()+":"+itoa(tgt.port)) {
+			continue // already dialed in a previous run -- resume past it
+		}
 		if e.job.Limit > 0 && uint64(e.state.Stats.Dialed) >= e.job.Limit {
 			e.logf("Reached dial limit of %d", e.job.Limit)
 			e.finish("ToneLoc Exiting ...")
@@ -214,6 +283,27 @@ func (e *Engine) Run(ctx context.Context) {
 			continue
 		}
 		e.record(res)
+		e.autosave(false)
+	}
+}
+
+// autosave writes the data file at most every 15s while a scan runs (and always
+// when force is set, e.g. on exit), so progress survives a crash or Ctrl-C.
+func (e *Engine) autosave(force bool) {
+	if e.dat == nil || !e.dirty {
+		return
+	}
+	if !force && time.Since(e.lastSave) < 15*time.Second {
+		return
+	}
+	if err := e.dat.Save(); err != nil {
+		e.logf("Autosave failed: %v", err)
+		return
+	}
+	e.dirty = false
+	e.lastSave = time.Now()
+	if !force {
+		e.log("Autosaving")
 	}
 }
 
@@ -382,6 +472,13 @@ func (e *Engine) record(res Result) {
 			e.state.Found = e.state.Found[len(e.state.Found)-5:]
 		}
 	}
+	if e.dat != nil {
+		e.dat.record(res)
+		e.dirty = true
+	}
+	if idx, ok := e.job.Mask.Index(res.Addr); ok {
+		e.state.markTone(int(idx), res.Response)
+	}
 	// dials/hour
 	elapsed := now.Sub(e.state.StartTime).Hours()
 	if elapsed > 0 {
@@ -414,6 +511,7 @@ func (e *Engine) logTarget(res Result, tag string) {
 }
 
 func (e *Engine) finish(msg string) {
+	e.autosave(true)
 	e.state.mu.Lock()
 	e.state.Done = true
 	e.state.Status = msg
@@ -421,6 +519,9 @@ func (e *Engine) finish(msg string) {
 	dph := e.state.DialsHour
 	e.state.mu.Unlock()
 	e.logf("Dials/hour : %d", dph)
+	if e.dat != nil && e.dat.Path != "" {
+		e.logf("Saved %d results to %s", len(e.dat.Results), e.dat.Path)
+	}
 	e.logf("%s (%d dialed)", msg, dialed)
 }
 
