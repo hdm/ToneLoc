@@ -328,13 +328,18 @@ func (e *Engine) dialOne(ctx context.Context, tgt target, waitDelay time.Duratio
 	dctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	target := tgt.addr.String() + ":" + itoa(tgt.port)
 	e.state.mu.Lock()
-	e.state.Target = tgt.addr.String() + ":" + itoa(tgt.port)
+	e.state.Target = target
 	e.state.Meter = 0
 	e.state.Rings = 0
 	e.state.Tries = 1
 	e.state.Status = ""
 	e.state.mu.Unlock()
+
+	// Authentic modem chatter: echo the dial command (shows in both the
+	// terminal and the ghostty.js web view).
+	e.modem("ATDT " + target)
 
 	resCh := make(chan Result, 1)
 	start := time.Now()
@@ -486,6 +491,9 @@ func (e *Engine) record(res Result) {
 	}
 	e.state.mu.Unlock()
 
+	// Modem result code, the way a real Hayes-compatible modem would answer.
+	e.modem(modemResultCode(res))
+
 	// Activity log line, in the spirit of the original messages.
 	switch res.Response {
 	case RespCarrier, RespTone:
@@ -508,6 +516,30 @@ func (e *Engine) record(res Result) {
 
 func (e *Engine) logTarget(res Result, tag string) {
 	e.logf("%-19s - %s", res.Target(), tag)
+}
+
+// modemResultCode renders a result as the Hayes AT result code a modem would
+// have printed -- pure 1990s flavour for the Modem window.
+func modemResultCode(res Result) string {
+	switch res.Response {
+	case RespCarrier:
+		speeds := []string{"CONNECT 2400", "CONNECT 9600", "CONNECT 14400", "CONNECT 33600", "CONNECT 57600"}
+		return speeds[int(res.Port)%len(speeds)]
+	case RespTone:
+		return "CONNECT 33600/ARQ"
+	case RespBusy:
+		return "BUSY"
+	case RespNoDialtone:
+		return "NO DIALTONE"
+	case RespVoice:
+		return "VOICE"
+	case RespRingout, RespTimeout:
+		return "NO CARRIER"
+	case RespAborted:
+		return "+++"
+	default:
+		return "OK"
+	}
 }
 
 func (e *Engine) finish(msg string) {

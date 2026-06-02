@@ -5,75 +5,191 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>ToneLoc/Go &mdash; war-dialing the IPv4 phone book</title>
 <style>
-  :root { --amber:#ffb000; --green:#33ff66; }
-  html,body{height:100%;margin:0;background:#0a0a0a;color:#cfcfcf;
+  :root { --amber:#ffb000; --green:#33ff66; --phos:rgba(80,255,140,.45); }
+  *{box-sizing:border-box;}
+  html,body{height:100%;margin:0;background:#000;color:#cfcfcf;
     font-family:"Courier New",monospace;overflow:hidden;}
-  /* Faux-CRT bezel + monitor housing for that 90s desk vibe. */
-  #frame{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-    background:
-      radial-gradient(ellipse at center, #1a1a1a 0%, #050505 75%);}
-  #bezel{padding:26px 30px 40px;border-radius:22px;
-    background:linear-gradient(145deg,#2b2b2b,#0e0e0e);
-    box-shadow: inset 0 0 4px #000, 0 18px 60px rgba(0,0,0,.8), 0 0 0 2px #000;}
-  #screen{position:relative;border-radius:10px;overflow:hidden;
-    background:#000;box-shadow: inset 0 0 60px rgba(0,0,0,.95), inset 0 0 14px rgba(60,255,120,.05);}
-  /* scanlines + vignette overlays */
-  #screen::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:5;
-    background:repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px, rgba(0,0,0,.18) 3px);
-    mix-blend-mode:multiply;}
-  #screen::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:6;
-    box-shadow: inset 0 0 120px rgba(0,0,0,.6);border-radius:10px;}
-  #term{padding:10px;}
-  #term canvas, #term .xterm{ image-rendering: pixelated; }
-  #label{margin-top:14px;text-align:center;color:#666;font-size:12px;letter-spacing:2px;}
+
+  /* Matrix hex-rain backdrop behind the whole machine. */
+  #matrix{position:fixed;inset:0;z-index:0;opacity:.30;}
+
+  #frame{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;
+    background:radial-gradient(ellipse at center, rgba(10,10,10,.65) 0%, rgba(0,0,0,.92) 78%);}
+
+  /* The monitor housing. */
+  #bezel{position:relative;padding:26px 30px 42px;border-radius:24px;
+    background:linear-gradient(155deg,#343434,#0c0c0c);
+    box-shadow: inset 0 0 4px #000, inset 0 2px 14px rgba(255,255,255,.05),
+                0 22px 70px rgba(0,0,0,.85), 0 0 0 2px #000;}
+  #bezel::after{ /* power LED */
+    content:"";position:absolute;right:34px;bottom:16px;width:8px;height:8px;border-radius:50%;
+    background:var(--green);box-shadow:0 0 8px var(--green);animation:led 3.2s infinite;}
+  @keyframes led{0%,92%,100%{opacity:1}95%{opacity:.3}}
+
+  #screen{position:relative;border-radius:14px/12px;overflow:hidden;background:#000;
+    box-shadow: inset 0 0 70px rgba(0,0,0,.95), inset 0 0 16px rgba(60,255,120,.06);
+    transform-origin:center; animation:flick 7s infinite;}
+  /* CRT power-on: a bright line that opens into the full picture. */
+  #screen.boot{animation:poweron 1.1s ease-out forwards;}
+  @keyframes poweron{
+    0%{transform:scale(1,.002);filter:brightness(6);opacity:0;}
+    8%{transform:scale(1,.004);filter:brightness(6);opacity:1;}
+    45%{transform:scale(1.01,1);filter:brightness(2.2);}
+    100%{transform:scale(1,1);filter:brightness(1);}
+  }
+  @keyframes flick{0%,100%{opacity:.985}48%{opacity:1}52%{opacity:.97}}
+
+  /* The terminal itself; constant chromatic aberration + phosphor bloom. */
+  #term{padding:12px;filter:
+      drop-shadow(.6px 0 0 rgba(255,40,40,.35))
+      drop-shadow(-.6px 0 0 rgba(40,200,255,.35));}
+  #term canvas,#term .xterm{image-rendering:pixelated;}
+
+  /* VGA scanlines. */
+  #scanlines{position:absolute;inset:0;z-index:5;pointer-events:none;mix-blend-mode:multiply;
+    background:repeating-linear-gradient(to bottom,
+      rgba(0,0,0,0) 0px, rgba(0,0,0,0) 1px, rgba(0,0,0,.30) 2px, rgba(0,0,0,.30) 3px);}
+  /* Aperture-grille vertical tint. */
+  #grille{position:absolute;inset:0;z-index:5;pointer-events:none;mix-blend-mode:screen;opacity:.05;
+    background:repeating-linear-gradient(to right,#f00 0,#0f0 1px,#00f 2px,#000 3px);}
+  /* A slow rolling brightness band. */
+  #sweep{position:absolute;left:0;right:0;height:22%;z-index:6;pointer-events:none;
+    background:linear-gradient(to bottom, rgba(120,255,170,0), rgba(120,255,170,.06), rgba(120,255,170,0));
+    animation:roll 7.5s linear infinite;}
+  @keyframes roll{0%{top:-25%}100%{top:105%}}
+  /* TV static. */
+  #noise{position:absolute;inset:0;z-index:6;pointer-events:none;opacity:.04;mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+    animation:fuzz .5s steps(3) infinite;}
+  @keyframes fuzz{0%{background-position:0 0}33%{background-position:-40px 30px}66%{background-position:30px -20px}100%{background-position:0 0}}
+  /* Vignette + curvature glow. */
+  #vignette{position:absolute;inset:0;z-index:7;pointer-events:none;border-radius:14px/12px;
+    box-shadow: inset 0 0 130px rgba(0,0,0,.65);}
+
+  /* Glitch bursts: brief tearing + RGB split + hue shift. */
+  #screen.glitch #term{animation:glitch .28s steps(2) 1;}
+  @keyframes glitch{
+    0%{transform:translate(0,0);filter:drop-shadow(.6px 0 0 rgba(255,40,40,.35)) drop-shadow(-.6px 0 0 rgba(40,200,255,.35));}
+    20%{transform:translate(-4px,1px);filter:drop-shadow(6px 0 0 rgba(255,0,80,.6)) drop-shadow(-6px 0 0 rgba(0,255,210,.6)) hue-rotate(20deg);clip-path:inset(8% 0 70% 0);}
+    40%{transform:translate(5px,-2px);clip-path:inset(60% 0 12% 0);}
+    60%{transform:translate(-3px,0);filter:drop-shadow(9px 0 0 rgba(255,0,80,.6)) drop-shadow(-9px 0 0 rgba(0,255,210,.6));clip-path:inset(30% 0 40% 0);}
+    80%{transform:translate(2px,1px);clip-path:inset(0 0 0 0);}
+    100%{transform:translate(0,0);}
+  }
+  #screen.glitch #noise{opacity:.18;}
+
+  #label{margin-top:16px;text-align:center;color:#6a6a6a;font-size:12px;letter-spacing:2px;}
   #label b{color:var(--amber);}
-  #status{position:absolute;top:8px;right:14px;z-index:7;font-size:11px;color:#555;}
-  #status.live{color:var(--green);}
-  #boot{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;
-    color:var(--green);background:#000;font-size:14px;text-shadow:0 0 6px var(--green);}
+  #status{position:absolute;top:8px;right:14px;z-index:9;font-size:11px;color:#555;}
+  #status.live{color:var(--green);text-shadow:0 0 6px var(--green);}
+
+  /* Fake BIOS/POST boot overlay before the socket connects. */
+  #boot{position:absolute;inset:0;z-index:8;padding:16px 18px;color:var(--green);
+    background:#000;font-size:14px;line-height:1.45;white-space:pre-wrap;
+    text-shadow:0 0 6px var(--phos);}
+  #boot .cur{animation:blink 1s steps(1) infinite;}
+  @keyframes blink{50%{opacity:0}}
   a{color:var(--amber);}
-  @keyframes flick{0%,100%{opacity:.97}50%{opacity:1}}
-  #screen{animation:flick 6s infinite;}
 </style>
 </head>
 <body>
+<canvas id="matrix"></canvas>
 <div id="frame">
   <div id="bezel">
-    <div id="screen">
-      <div id="status">&#9679; offline</div>
+    <div id="screen" class="boot">
+      <div id="status">&#9675; offline</div>
       <div id="term"></div>
-      <div id="boot">INITIALIZING MODEM&hellip;</div>
+      <div id="grille"></div>
+      <div id="scanlines"></div>
+      <div id="sweep"></div>
+      <div id="noise"></div>
+      <div id="vignette"></div>
+      <div id="boot"></div>
     </div>
-    <div id="label">T O N E L O C / G O &nbsp;&mdash;&nbsp; <b>ghostty.js</b> terminal &nbsp;|&nbsp; click the screen, then type. ESC quits.</div>
+    <div id="label">T O N E L O C / G O &nbsp;&mdash;&nbsp; <b>ghostty.js</b> terminal &nbsp;|&nbsp; click the screen, then type. M=ToneMap, ESC=quit.</div>
   </div>
 </div>
 
-<script type="module">
-const COLS = 80, ROWS = 25;
-const statusEl = document.getElementById('status');
+<script>
+// ---- Matrix hex-rain backdrop --------------------------------------------
+(function(){
+  const cv = document.getElementById('matrix'), ctx = cv.getContext('2d');
+  const glyphs = '0123456789ABCDEF$#%&*+=/\\<>?ATDTCONNECTNOCARRIER'.split('');
+  let cols, drops, fs = 14;
+  function resize(){ cv.width = innerWidth; cv.height = innerHeight;
+    cols = Math.floor(cv.width / fs); drops = Array(cols).fill(0).map(()=>Math.random()*-50); }
+  resize(); addEventListener('resize', resize);
+  function tick(){
+    ctx.fillStyle = 'rgba(0,0,0,.08)'; ctx.fillRect(0,0,cv.width,cv.height);
+    ctx.font = fs+'px monospace';
+    for(let i=0;i<cols;i++){
+      const c = glyphs[(Math.random()*glyphs.length)|0];
+      const x = i*fs, y = drops[i]*fs;
+      ctx.fillStyle = Math.random()<0.02 ? '#aaffcc' : 'rgba(40,200,90,.85)';
+      ctx.fillText(c, x, y);
+      if(y > cv.height && Math.random() > 0.975) drops[i] = 0;
+      drops[i] += 1;
+    }
+    setTimeout(()=>requestAnimationFrame(tick), 55);
+  }
+  tick();
+})();
+
+// ---- Periodic glitch bursts ----------------------------------------------
+(function(){
+  const screen = document.getElementById('screen');
+  (function loop(){
+    const wait = 3500 + Math.random()*6000;
+    setTimeout(()=>{
+      screen.classList.add('glitch');
+      setTimeout(()=>screen.classList.remove('glitch'), 300);
+      loop();
+    }, wait);
+  })();
+})();
+
+// ---- Fake BIOS/POST boot sequence ----------------------------------------
 const bootEl = document.getElementById('boot');
+const BOOT = [
+  "ToneLoc/Go BIOS v1.10  (c) 1994-2026 Minor Threat & Mucho Maas",
+  "",
+  "Detecting CPU................. GenuineGopher @ 4.77 THz",
+  "Memory test................... 640K OK (the rest is for the demos)",
+  "Initializing FOSSIL driver.... OK",
+  "Probing serial ports.......... COM1 16550A  COM2 -none-",
+  "Resetting modem  ATZ.......... OK",
+  "Loading TONELOC.CFG........... OK",
+  "Spinning up zmap-go scanner... OK",
+  "Acquiring carrier.............",
+];
+let bi = 0, bc = 0, bootText = "";
+function boot(){
+  if (bi >= BOOT.length){ bootEl.innerHTML = bootText + '<span class="cur">_</span>'; return; }
+  const line = BOOT[bi];
+  if (bc <= line.length){ bootEl.innerHTML = bootText + line.slice(0,bc) + '<span class="cur">_</span>'; bc++;
+    setTimeout(boot, line ? 9 : 60);
+  } else { bootText += line + "\n"; bi++; bc = 0; setTimeout(boot, 70); }
+}
+boot();
+
+// ---- Terminal: ghostty.js first, xterm.js fallback -----------------------
+const statusEl = document.getElementById('status');
 const mount = document.getElementById('term');
+function setStatus(t,live){ statusEl.textContent=(live?'● ':'○ ')+t; statusEl.className=live?'live':''; }
+const COLS=80, ROWS=25;
 
-function setStatus(text, live){ statusEl.textContent = (live?'● ':'○ ')+text; statusEl.className = live?'live':''; }
-
-// --- terminal factory: ghostty.js first, xterm.js as a graceful fallback ---
 async function makeTerminal(){
-  const theme = {
-    background:'#000000', foreground:'#aaaaaa',
-    cursor:'#33ff66', black:'#000000', brightBlack:'#555555',
-  };
-  try {
+  const theme={ background:'#000000', foreground:'#aaaaaa', cursor:'#33ff66' };
+  try{
     const g = await import('https://cdn.jsdelivr.net/npm/ghostty-web/+esm');
     if (g.init) await g.init();
-    const term = new g.Terminal({ fontSize: 16, theme });
+    const term = new g.Terminal({ fontSize:16, theme });
     term.open(mount);
     return { term, kind:'ghostty.js' };
-  } catch (e) {
+  }catch(e){
     console.warn('ghostty-web unavailable, falling back to xterm.js:', e);
-    await import('https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css', { with:{ type:'css' } }).catch(()=>{
-      const l=document.createElement('link'); l.rel='stylesheet';
-      l.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css'; document.head.appendChild(l);
-    });
+    const l=document.createElement('link'); l.rel='stylesheet';
+    l.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css'; document.head.appendChild(l);
     const x = await import('https://cdn.jsdelivr.net/npm/@xterm/xterm/+esm');
     const term = new x.Terminal({ fontSize:16, theme, cols:COLS, rows:ROWS, convertEol:false });
     term.open(mount);
@@ -82,24 +198,27 @@ async function makeTerminal(){
 }
 
 (async () => {
+  document.getElementById('screen').addEventListener('animationend', e=>{
+    if(e.animationName==='poweron') document.getElementById('screen').classList.remove('boot');
+  });
+
   const { term, kind } = await makeTerminal();
   try { term.resize(COLS, ROWS); } catch {}
   document.getElementById('label').innerHTML =
-    'T O N E L O C / G O &mdash; <b>'+kind+'</b> &nbsp;|&nbsp; click the screen, then type. ESC quits.';
+    'T O N E L O C / G O &mdash; <b>'+kind+'</b> &nbsp;|&nbsp; click the screen, then type. M=ToneMap, ESC=quit.';
 
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(proto + '://' + location.host + '/ws');
+  const proto = location.protocol==='https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(proto+'://'+location.host+'/ws');
 
-  ws.onopen = () => { setStatus('connected', true); bootEl.style.display='none'; mount.focus?.(); };
-  ws.onclose = () => { setStatus('disconnected', false); term.write('\r\n\x1b[31m-- carrier lost --\x1b[0m\r\n'); };
-  ws.onerror = () => setStatus('error', false);
-  ws.onmessage = (e) => { term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data)); };
+  ws.onopen = () => { setStatus('carrier',true); setTimeout(()=>{ bootEl.style.transition='opacity .4s'; bootEl.style.opacity='0';
+    setTimeout(()=>bootEl.style.display='none',420); }, 250); mount.focus?.(); };
+  ws.onclose = () => { setStatus('NO CARRIER',false); term.write('\r\n\x1b[31m-- carrier lost --\x1b[0m\r\n'); };
+  ws.onerror = () => setStatus('error',false);
+  ws.onmessage = (e) => { term.write(typeof e.data==='string' ? e.data : new Uint8Array(e.data)); };
 
-  term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
-
-  // Keep the engine fed even if the terminal swallows some keys.
+  term.onData((d)=>{ if (ws.readyState===WebSocket.OPEN) ws.send(d); });
   mount.tabIndex = 0;
-  mount.addEventListener('click', () => mount.focus());
+  mount.addEventListener('click', ()=>mount.focus());
 })();
 </script>
 </body>
