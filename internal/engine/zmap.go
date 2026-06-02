@@ -151,9 +151,30 @@ func ensureZmapBinary(ctx context.Context, log func(string)) (string, error) {
 		return p, nil
 	}
 	// Build from the sibling module referenced by our go.mod replace directive.
-	candidates := []string{"../zmap-go", "zmap-go"}
+	// Search ZMAP_GO_DIR, then a sibling "zmap-go" walking up from the working
+	// directory and the executable's directory, so it resolves whether ToneLoc
+	// is run from the repo root or a subdirectory.
+	var candidates []string
 	if env := os.Getenv("ZMAP_GO_DIR"); env != "" {
-		candidates = append([]string{env}, candidates...)
+		candidates = append(candidates, env)
+	}
+	var roots []string
+	if wd, err := os.Getwd(); err == nil {
+		roots = append(roots, wd)
+	}
+	if exe, err := os.Executable(); err == nil {
+		roots = append(roots, filepath.Dir(exe))
+	}
+	for _, root := range roots {
+		dir := root
+		for i := 0; i < 6; i++ {
+			candidates = append(candidates, filepath.Join(dir, "zmap-go"), filepath.Join(dir, "..", "zmap-go"))
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
 	}
 	var srcDir string
 	for _, c := range candidates {
