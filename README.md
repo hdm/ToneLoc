@@ -150,19 +150,39 @@ fake BIOS/POST boot sequence before the carrier connects. It also synthesizes
 handshake screech on a carrier (toggle with **S**). (If `ghostty-web` can't be
 reached, the page falls back to `xterm.js` automatically.)
 
-## ToneLoc: THE GAME (standalone, no server)
+## Games (standalone, no server)
 
-There's also a complete **server-free JavaScript game** in [`game/`](game/) — the
-whole ToneLoc frontend (DOS renderer, dialer, ToneMap, Hall of Fame, CRT/glitch
-shell, modem sounds) reimplemented in the browser, played as an arcade hacker
-game:
+The [`game/`](game/) directory holds **server-free JavaScript games** — the
+whole ToneLoc frontend (an 80×25 DOS renderer drawn to `<canvas>`, the CRT/glitch
+shell, modem sounds) reimplemented in the browser. No backend, no network: they
+run straight from `file://`.
 
-> **War-dial the net before the Feds trace you.** Find carriers and tones to
-> score and clear each level's quota while a **TRACE** meter climbs. Honeypots
-> spike it. Hit 100% and you're **BUSTED**. Burn an **evade** (C) to clear your
-> logs; **boost** (B) to dial faster at the cost of more heat.
+### NETRUNNER — `game/index.html`
 
-The game world is **seeded by real-zmap-format data**: `game/seed.js` is
+A network-infiltration roguelike:
+
+> Start at **HOME**. **Scan** to find nodes; **breach** them with a turn-based
+> exploit fight (pick tools, guess passwords); use each foothold to **pivot**
+> deeper for **loot** and intel. But the moment you're live on the wire a
+> **TRACE** crawls back along your connection toward HOME — let it reach your
+> home node while you're connected and you're **BUSTED**. Grab the **MAINFRAME**
+> and go **DARK** to win. Deeper footholds and longer sessions trace faster;
+> honeypots (☠) spike it; disconnect (R) to cool down and bank your loot.
+
+Loop: **S** scan an owned node · **I** infiltrate a discovered one · **L** loot ·
+**R** go dark / reconnect · arrows/**jk** move · **?** help. In a breach: pick a
+vector and a tool, **ENTER** to attack and drop the target's SHIELD without
+maxing its ALARM; **G** to guess the password (looted intel ⚷ reveals it).
+
+### Arcade dialer — `game/arcade.html`
+
+The original arcade take: war-dial blocks of the net for carriers/tones to
+score and clear a quota before a TRACE meter hits 100%. **M** cycles
+Dialer/ToneMap/Hall of Fame, **C** clears logs, **B** boosts.
+
+### The seeded world
+
+Both games are **seeded by real-zmap-format data**: `game/seed.js` is
 produced by the `toneloc-seed` tool, which walks the address space with
 zmap-go's cyclic iterator (the same permutation the real scanner uses) — or
 ingests an actual `zmap` scan:
@@ -188,9 +208,7 @@ xdg-open game/index.html            # / open on macOS
 python3 -m http.server -d game 8090 # any static server works too
 ```
 
-Controls: **ENTER** start · **M** cycle views · **F** hall of fame · **C**
-clear logs (evade) · **B** boost · **P** pause · **S** sound · **ESC** title.
-High score is kept in `localStorage`.
+High scores are kept in `localStorage`.
 
 ## How it fits together
 
@@ -205,7 +223,8 @@ internal/tui           the 3-window dialer + the ToneMap view, keyboard and
                        mouse handling (arrow/SGR-mouse escape parsing)
 internal/web           HTTP + WebSocket bridge to ghostty.js; static game server
 cmd/toneloc-seed       builds game/seed.js from zmap-go's iterator or a zmap CSV
-game/                  the standalone, server-free JavaScript arcade game
+game/                  standalone JS games: NETRUNNER (index.html) + arcade dialer
+                       (arcade.html), sharing the canvas DOS renderer and seed.js
 ```
 
 ## Legal / ethical note
