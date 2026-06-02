@@ -142,7 +142,9 @@ func (e *Engine) seedFromDat(dat *DatFile) {
 			st.Timeout++
 		}
 		if r.Response.Found() {
-			e.state.Found = append(e.state.Found, FoundEntry{Target: r.Target(), Resp: r.Response, When: dat.Updated})
+			entry := FoundEntry{Target: r.Target(), Resp: r.Response, When: dat.Updated}
+			e.state.Found = append(e.state.Found, entry)
+			e.state.hits = append(e.state.hits, entry)
 		}
 		if idx, ok := e.job.Mask.Index(r.Addr); ok {
 			e.state.markTone(int(idx), r.Response)
@@ -472,10 +474,12 @@ func (e *Engine) record(res Result) {
 		st.Timeout++
 	}
 	if res.Response.Found() {
-		e.state.Found = append(e.state.Found, FoundEntry{Target: res.Target(), Resp: res.Response, When: now})
+		entry := FoundEntry{Target: res.Target(), Resp: res.Response, Banner: res.Banner, When: now}
+		e.state.Found = append(e.state.Found, entry)
 		if len(e.state.Found) > 5 {
 			e.state.Found = e.state.Found[len(e.state.Found)-5:]
 		}
+		e.state.hits = append(e.state.hits, entry)
 	}
 	if e.dat != nil {
 		e.dat.record(res)

@@ -48,6 +48,12 @@ func TestGenerateScreenshot(t *testing.T) {
 	tm.curCol, tm.curRow = 18, 9
 	tm.frame = 4
 	write(t, dir+"/toneloc-tonemap.svg", tm.FrameSVG())
+
+	// Hall of Fame.
+	hof := New(eng, nil)
+	hof.setMode(modeHallOfFame)
+	hof.frame = 4
+	write(t, dir+"/toneloc-halloffame.svg", hof.FrameSVG())
 }
 
 func write(t *testing.T, path, data string) {

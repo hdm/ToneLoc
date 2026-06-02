@@ -22,6 +22,7 @@ type Stats struct {
 type FoundEntry struct {
 	Target string
 	Resp   Response
+	Banner string
 	When   time.Time
 }
 
@@ -33,9 +34,10 @@ type State struct {
 	mu sync.Mutex
 
 	Stats    Stats
-	Activity *ring // left-hand activity log
-	Modem    *ring // top-right modem window
-	Found    []FoundEntry
+	Activity *ring        // left-hand activity log
+	Modem    *ring        // top-right modem window
+	Found    []FoundEntry // last few hits (for the stats panel)
+	hits     []FoundEntry // every carrier/tone found (for the Hall of Fame)
 
 	Meter     float64 // 0..1 progress of the current dial
 	Target    string  // current addr:port being dialed
@@ -135,6 +137,16 @@ func (s *State) markTone(idx int, resp Response) {
 	if resp.Priority() >= Response(s.tone[idx]).Priority() {
 		s.tone[idx] = uint8(resp)
 	}
+}
+
+// HitsSnapshot returns a copy of every carrier/tone found so far, for the Hall
+// of Fame view.
+func (s *State) HitsSnapshot() []FoundEntry {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]FoundEntry, len(s.hits))
+	copy(out, s.hits)
+	return out
 }
 
 // ToneSpan is the number of addresses in the map.

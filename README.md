@@ -100,8 +100,14 @@ random number twice" promise.
 ```
 ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait
 N/C/F/G/V/Y annotate the current number
-M or TAB   switch between the Dialer and the ToneMap
+M or TAB   cycle views: Dialer -> ToneMap -> Hall of Fame   (F jumps to Hall of Fame)
 ```
+
+### Hall of Fame
+
+Cycle to the **Hall of Fame** (M, or press **F**) for the trophy case: every
+carrier and tone the scan has bagged, with the banner each one coughed up,
+scrollable with **j/k** or the arrow keys.
 
 ### ToneMap
 
@@ -136,9 +142,13 @@ The browser loads [`ghostty-web`](https://github.com/coder/ghostty-web) — the
 xterm.js-compatible WASM build of Ghostty's VT100 emulator — from a CDN and
 opens a WebSocket back to the server. The server runs the **same** TUI render
 loop per connection and streams the identical ANSI/VT output a local terminal
-would draw; keystrokes flow back over the socket. The page wraps it in a
-faux-CRT bezel with scanlines for maximum 1994 energy. (If `ghostty-web` can't
-be reached, the page falls back to `xterm.js` automatically.)
+would draw; keystrokes flow back over the socket. The page goes full retro: a
+matrix hex-rain backdrop, a CRT power-on animation, VGA scanlines, chromatic
+aberration with periodic glitch tearing and TV static, a faux-CRT bezel, and a
+fake BIOS/POST boot sequence before the carrier connects. It also synthesizes
+**modem audio** with WebAudio — dial tones, busy signals, and the unmistakable
+handshake screech on a carrier (toggle with **S**). (If `ghostty-web` can't be
+reached, the page falls back to `xterm.js` automatically.)
 
 ## How it fits together
 

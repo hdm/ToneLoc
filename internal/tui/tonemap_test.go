@@ -61,9 +61,13 @@ func TestModeToggleAndEscQuit(t *testing.T) {
 	if app.mode != modeToneMap {
 		t.Fatal("M should switch to ToneMap")
 	}
+	app.feed('m')
+	if app.mode != modeHallOfFame {
+		t.Fatal("M again should switch to Hall of Fame")
+	}
 	app.feed('\t')
 	if app.mode != modeDialer {
-		t.Fatal("TAB should switch back to dialer")
+		t.Fatal("TAB should cycle back to dialer")
 	}
 
 	// An arrow key must NOT be read as a quit, but a lone ESC byte (followed by

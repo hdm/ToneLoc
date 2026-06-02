@@ -58,6 +58,9 @@ type App struct {
 	mapPerCell     int
 	mapAt          time.Time
 
+	// Hall of Fame scroll offset.
+	hofScroll int
+
 	// Input escape-sequence parser state (arrows + SGR mouse share ESC[).
 	escState int // 0 normal, 1 saw ESC, 2 collecting CSI
 	csiBuf   []byte
@@ -66,6 +69,10 @@ type App struct {
 	// Boot splash (intro screen) timing.
 	splashUntil time.Time
 	splashDone  bool
+
+	// Sound-cue edge detection (the web view turns these into modem audio).
+	prevCarriers, prevTones, prevBusy int
+	prevTarget                        string
 }
 
 type viewMode int
@@ -73,6 +80,7 @@ type viewMode int
 const (
 	modeDialer viewMode = iota
 	modeToneMap
+	modeHallOfFame
 )
 
 // New builds an App that draws to out.
@@ -207,13 +215,14 @@ func (a *App) handleNormal(b byte) bool {
 	switch b {
 	case 'q', 'Q': // explicit quit
 		return true
-	case 'm', 'M', '\t': // toggle Dialer <-> ToneMap
-		if a.mode == modeDialer {
-			a.setMode(modeToneMap)
-		} else {
-			a.setMode(modeDialer)
-		}
+	case 'm', 'M', '\t': // cycle Dialer -> ToneMap -> Hall of Fame
+		a.setMode((a.mode + 1) % 3)
 		return false
+	case 'f', 'F': // jump straight to the Hall of Fame
+		if a.mode != modeDialer { // 'F' is also a Dialer note key
+			a.setMode(modeHallOfFame)
+			return false
+		}
 	}
 
 	if a.mode == modeToneMap {
@@ -222,6 +231,15 @@ func (a *App) handleNormal(b byte) bool {
 			a.moveCursor(-1, 0)
 		case 'l':
 			a.moveCursor(1, 0)
+		case 'k':
+			a.moveCursor(0, -1)
+		case 'j':
+			a.moveCursor(0, 1)
+		}
+		return false
+	}
+	if a.mode == modeHallOfFame {
+		switch b {
 		case 'k':
 			a.moveCursor(0, -1)
 		case 'j':
@@ -283,6 +301,13 @@ func (a *App) enableMouse(on bool) {
 }
 
 func (a *App) moveCursor(dx, dy int) {
+	if a.mode == modeHallOfFame {
+		a.hofScroll += dy // clamped at draw time against the list length
+		if a.hofScroll < 0 {
+			a.hofScroll = 0
+		}
+		return
+	}
 	a.curCol = clamp(a.curCol+dx, 0, tmGW-1)
 	a.curRow = clamp(a.curRow+dy, 0, tmGH-1)
 }
@@ -299,6 +324,33 @@ func (a *App) hoverAt(sx, sy int) {
 	}
 	a.curCol = cx
 	a.curRow = cy
+}
+
+// emitCues detects newly-completed dials and emits a private OSC sequence per
+// event. The ghostty.js page intercepts these and synthesizes modem audio (dial
+// tones, the handshake screech, busy tones); a real terminal harmlessly ignores
+// them. Cues are gated on the Speaker toggle, so pressing S silences them.
+func (a *App) emitCues(v engine.StateView) {
+	if a.out != nil && v.Speaker && !a.inSplash() {
+		if v.Stats.Carriers > a.prevCarriers {
+			a.cue("connect")
+		}
+		if v.Stats.Tones > a.prevTones {
+			a.cue("tone")
+		}
+		if v.Stats.Busy > a.prevBusy {
+			a.cue("busy")
+		}
+		if v.Target != a.prevTarget && v.Target != "" {
+			a.cue("dial")
+		}
+	}
+	a.prevCarriers, a.prevTones, a.prevBusy = v.Stats.Carriers, v.Stats.Tones, v.Stats.Busy
+	a.prevTarget = v.Target
+}
+
+func (a *App) cue(event string) {
+	io.WriteString(a.out, "\x1b]1337;"+event+"\x07")
 }
 
 func clamp(v, lo, hi int) int {
@@ -326,12 +378,17 @@ func (a *App) FrameSVG() string {
 
 func (a *App) draw(v engine.StateView) {
 	a.blink = (a.frame/10)%2 == 0
+	a.emitCues(v)
 	if a.inSplash() {
 		a.drawSplash()
 		return
 	}
 	if a.mode == modeToneMap {
 		a.drawToneMap(v)
+		return
+	}
+	if a.mode == modeHallOfFame {
+		a.drawHallOfFame(v)
 		return
 	}
 	s := a.scr

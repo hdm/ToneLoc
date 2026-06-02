@@ -172,6 +172,50 @@ function boot(){
 }
 boot();
 
+// ---- WebAudio modem sounds -----------------------------------------------
+// The server emits private OSC cues (ESC ]1337;<event> BEL) on dials, carriers,
+// tones and busies; we synthesize the matching 1990s modem audio here.
+const Modem = (function(){
+  let ctx=null, last={}, hsUntil=0;
+  function ensure(){
+    if(!ctx){ try{ ctx=new (window.AudioContext||window.webkitAudioContext)(); }catch(e){ return null; } }
+    if(ctx.state==='suspended') ctx.resume();
+    return ctx;
+  }
+  function tone(freq,dur,when,type,gain){ const c=ctx; const o=c.createOscillator(),g=c.createGain();
+    o.type=type||'sine'; o.frequency.value=freq; o.connect(g); g.connect(c.destination);
+    const t=when, a=gain==null?0.14:gain;
+    g.gain.setValueAtTime(0,t); g.gain.linearRampToValueAtTime(a,t+0.008);
+    g.gain.setValueAtTime(a,t+dur-0.02); g.gain.linearRampToValueAtTime(0,t+dur);
+    o.start(t); o.stop(t+dur); }
+  function noise(dur,when,gain){ const c=ctx; const n=Math.max(1,(c.sampleRate*dur)|0);
+    const buf=c.createBuffer(1,n,c.sampleRate), d=buf.getChannelData(0);
+    for(let i=0;i<n;i++) d[i]=Math.random()*2-1;
+    const src=c.createBufferSource(); src.buffer=buf;
+    const f=c.createBiquadFilter(); f.type='bandpass'; f.frequency.value=1900; f.Q.value=0.6;
+    const g=c.createGain(); g.gain.value=gain==null?0.06:gain;
+    src.connect(f); f.connect(g); g.connect(c.destination); src.start(when); src.stop(when+dur); }
+  function rate(k,ms){ const n=performance.now(); if(n-(last[k]||0)<ms) return false; last[k]=n; return true; }
+  return {
+    resume(){ ensure(); },
+    dial(){ if(!ensure()||!rate('dial',130)) return; const t=ctx.currentTime;
+      tone(941,0.05,t,'sine',0.07); tone(1336,0.05,t,'sine',0.07); },
+    tone(){ if(!ensure()||!rate('tone',220)) return; tone(1150,0.22,ctx.currentTime,'sine',0.1); },
+    busy(){ if(!ensure()||!rate('busy',420)) return; let t=ctx.currentTime;
+      for(let i=0;i<2;i++){ tone(480,0.18,t,'sine',0.09); tone(620,0.18,t,'sine',0.09); t+=0.31; } },
+    connect(){ if(!ensure()) return; const now=performance.now();
+      if(now<hsUntil){ tone(1100,0.18,ctx.currentTime,'sine',0.09); return; } // already handshaking
+      hsUntil=now+2700; let t=ctx.currentTime;
+      tone(350,0.35,t,'sine',0.06); tone(440,0.35,t,'sine',0.06); t+=0.4;          // dial tone
+      [[697,1209],[770,1336],[852,1477],[697,1477],[941,1336]].forEach(p=>{        // DTMF dialing
+        tone(p[0],0.07,t,'sine',0.08); tone(p[1],0.07,t,'sine',0.08); t+=0.11; });
+      t+=0.12; tone(2100,0.55,t,'sine',0.11); t+=0.55;                              // answer tone
+      for(let i=0;i<8;i++){ tone(1100+(i%2?760:-260),0.11,t,'square',0.045); noise(0.11,t,0.05); t+=0.11; }
+      noise(0.55,t,0.035);                                                          // carrier hiss
+    },
+  };
+})();
+
 // ---- Terminal: ghostty.js first, xterm.js fallback -----------------------
 const statusEl = document.getElementById('status');
 const mount = document.getElementById('term');
@@ -205,7 +249,7 @@ async function makeTerminal(){
   const { term, kind } = await makeTerminal();
   try { term.resize(COLS, ROWS); } catch {}
   document.getElementById('label').innerHTML =
-    'T O N E L O C / G O &mdash; <b>'+kind+'</b> &nbsp;|&nbsp; click the screen, then type. M=ToneMap, ESC=quit.';
+    'T O N E L O C / G O &mdash; <b>'+kind+'</b> &nbsp;|&nbsp; click + type. M=views, F=hall of fame, S=sound, ESC=quit.';
 
   const proto = location.protocol==='https:' ? 'wss' : 'ws';
   const ws = new WebSocket(proto+'://'+location.host+'/ws');
@@ -214,11 +258,19 @@ async function makeTerminal(){
     setTimeout(()=>bootEl.style.display='none',420); }, 250); mount.focus?.(); };
   ws.onclose = () => { setStatus('NO CARRIER',false); term.write('\r\n\x1b[31m-- carrier lost --\x1b[0m\r\n'); };
   ws.onerror = () => setStatus('error',false);
-  ws.onmessage = (e) => { term.write(typeof e.data==='string' ? e.data : new Uint8Array(e.data)); };
+  ws.onmessage = (e) => {
+    let data = typeof e.data==='string' ? e.data : new TextDecoder().decode(e.data);
+    // Intercept private modem-sound cues and strip them before rendering.
+    data = data.replace(/\x1b\]1337;([a-z]+)\x07/g, (_, ev) => { try { Modem[ev] && Modem[ev](); } catch(_){} return ''; });
+    if (data) term.write(data);
+  };
 
   term.onData((d)=>{ if (ws.readyState===WebSocket.OPEN) ws.send(d); });
   mount.tabIndex = 0;
-  mount.addEventListener('click', ()=>mount.focus());
+  // Browsers require a user gesture before audio can start.
+  const wake = () => Modem.resume();
+  mount.addEventListener('click', ()=>{ mount.focus(); wake(); });
+  addEventListener('keydown', wake, { once:false });
 })();
 </script>
 </body>
