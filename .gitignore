@@ -1,0 +1,4 @@
+# Go port build artifacts
+/toneloc
+/toneloc-zmap
+*.out

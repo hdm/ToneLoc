@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ToneLoc/Go &mdash; war-dialing the IPv4 phone book</title>
+<style>
+  :root { --amber:#ffb000; --green:#33ff66; }
+  html,body{height:100%;margin:0;background:#0a0a0a;color:#cfcfcf;
+    font-family:"Courier New",monospace;overflow:hidden;}
+  /* Faux-CRT bezel + monitor housing for that 90s desk vibe. */
+  #frame{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
+    background:
+      radial-gradient(ellipse at center, #1a1a1a 0%, #050505 75%);}
+  #bezel{padding:26px 30px 40px;border-radius:22px;
+    background:linear-gradient(145deg,#2b2b2b,#0e0e0e);
+    box-shadow: inset 0 0 4px #000, 0 18px 60px rgba(0,0,0,.8), 0 0 0 2px #000;}
+  #screen{position:relative;border-radius:10px;overflow:hidden;
+    background:#000;box-shadow: inset 0 0 60px rgba(0,0,0,.95), inset 0 0 14px rgba(60,255,120,.05);}
+  /* scanlines + vignette overlays */
+  #screen::after{content:"";position:absolute;inset:0;pointer-events:none;z-index:5;
+    background:repeating-linear-gradient(to bottom, rgba(0,0,0,0) 0px, rgba(0,0,0,0) 2px, rgba(0,0,0,.18) 3px);
+    mix-blend-mode:multiply;}
+  #screen::before{content:"";position:absolute;inset:0;pointer-events:none;z-index:6;
+    box-shadow: inset 0 0 120px rgba(0,0,0,.6);border-radius:10px;}
+  #term{padding:10px;}
+  #term canvas, #term .xterm{ image-rendering: pixelated; }
+  #label{margin-top:14px;text-align:center;color:#666;font-size:12px;letter-spacing:2px;}
+  #label b{color:var(--amber);}
+  #status{position:absolute;top:8px;right:14px;z-index:7;font-size:11px;color:#555;}
+  #status.live{color:var(--green);}
+  #boot{position:absolute;inset:0;z-index:8;display:flex;align-items:center;justify-content:center;
+    color:var(--green);background:#000;font-size:14px;text-shadow:0 0 6px var(--green);}
+  a{color:var(--amber);}
+  @keyframes flick{0%,100%{opacity:.97}50%{opacity:1}}
+  #screen{animation:flick 6s infinite;}
+</style>
+</head>
+<body>
+<div id="frame">
+  <div id="bezel">
+    <div id="screen">
+      <div id="status">&#9679; offline</div>
+      <div id="term"></div>
+      <div id="boot">INITIALIZING MODEM&hellip;</div>
+    </div>
+    <div id="label">T O N E L O C / G O &nbsp;&mdash;&nbsp; <b>ghostty.js</b> terminal &nbsp;|&nbsp; click the screen, then type. ESC quits.</div>
+  </div>
+</div>
+
+<script type="module">
+const COLS = 80, ROWS = 25;
+const statusEl = document.getElementById('status');
+const bootEl = document.getElementById('boot');
+const mount = document.getElementById('term');
+
+function setStatus(text, live){ statusEl.textContent = (live?'● ':'○ ')+text; statusEl.className = live?'live':''; }
+
+// --- terminal factory: ghostty.js first, xterm.js as a graceful fallback ---
+async function makeTerminal(){
+  const theme = {
+    background:'#000000', foreground:'#aaaaaa',
+    cursor:'#33ff66', black:'#000000', brightBlack:'#555555',
+  };
+  try {
+    const g = await import('https://cdn.jsdelivr.net/npm/ghostty-web/+esm');
+    if (g.init) await g.init();
+    const term = new g.Terminal({ fontSize: 16, theme });
+    term.open(mount);
+    return { term, kind:'ghostty.js' };
+  } catch (e) {
+    console.warn('ghostty-web unavailable, falling back to xterm.js:', e);
+    await import('https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css', { with:{ type:'css' } }).catch(()=>{
+      const l=document.createElement('link'); l.rel='stylesheet';
+      l.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css'; document.head.appendChild(l);
+    });
+    const x = await import('https://cdn.jsdelivr.net/npm/@xterm/xterm/+esm');
+    const term = new x.Terminal({ fontSize:16, theme, cols:COLS, rows:ROWS, convertEol:false });
+    term.open(mount);
+    return { term, kind:'xterm.js (fallback)' };
+  }
+}
+
+(async () => {
+  const { term, kind } = await makeTerminal();
+  try { term.resize(COLS, ROWS); } catch {}
+  document.getElementById('label').innerHTML =
+    'T O N E L O C / G O &mdash; <b>'+kind+'</b> &nbsp;|&nbsp; click the screen, then type. ESC quits.';
+
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  const ws = new WebSocket(proto + '://' + location.host + '/ws');
+
+  ws.onopen = () => { setStatus('connected', true); bootEl.style.display='none'; mount.focus?.(); };
+  ws.onclose = () => { setStatus('disconnected', false); term.write('\r\n\x1b[31m-- carrier lost --\x1b[0m\r\n'); };
+  ws.onerror = () => setStatus('error', false);
+  ws.onmessage = (e) => { term.write(typeof e.data === 'string' ? e.data : new Uint8Array(e.data)); };
+
+  term.onData((data) => { if (ws.readyState === WebSocket.OPEN) ws.send(data); });
+
+  // Keep the engine fed even if the terminal swallows some keys.
+  mount.tabIndex = 0;
+  mount.addEventListener('click', () => mount.focus());
+})();
+</script>
+</body>
+</html>
