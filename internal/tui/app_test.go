@@ -36,7 +36,7 @@ func TestFrameLayout(t *testing.T) {
 			t.Fatalf("row %d width = %d, want %d", i, got, scrW)
 		}
 	}
-	for _, want := range []string{"Activity Log", "Modem", "Statistics", "ToneLoc started", "MaxDials"} {
+	for _, want := range []string{"Activity Log", "Modem", "Statistics", "Mask used", "MaxDials"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("frame missing %q", want)
 		}

@@ -48,14 +48,12 @@ Every concept in the original maps cleanly onto network scanning:
 
 ## Install / build
 
-ToneLoc/Go is built against its sibling scanner module via a `replace`
-directive, so check the two repos out **side by side**:
+ToneLoc/Go imports [`zmap-go`](https://github.com/hdm/zmap-go) as a normal Go
+module, so a single command installs it:
 
 ```sh
-git clone https://github.com/hdm/zmap-go
-git clone https://github.com/hdm/toneloc ToneLoc
-cd ToneLoc
-go build -o toneloc ./cmd/toneloc     # or: make
+go install github.com/hdm/toneloc/cmd/toneloc@latest
+# or, from a clone:  go build -o toneloc ./cmd/toneloc   (or: make)
 ```
 
 Requires Go 1.25+.
@@ -66,8 +64,17 @@ Requires Go 1.25+.
 toneloc <DataFile|Mask> [/M:mask] [/R:lo-hi] [/X:exmask] [/p:ports] [flags]
 ```
 
+**With no arguments**, ToneLoc auto-detects every local network this machine is
+attached to and sweeps them with a real TCP connect scan, hitting the most
+common ports first (80, 443, 22, 135, 445, 3389, ...):
+
+```sh
+toneloc            # scan all local networks, common ports first
+```
+
 **Masks** are the IP equivalent of the old `555-1XXX` phone masks — each `X` is
-a wildcard octet, and the space is dialed in random, non-repeating order:
+a wildcard octet, and the space is dialed in random, non-repeating order. The
+scan is swept one network at a time, one port at a time (common ports first):
 
 ```sh
 toneloc 192.168.1.X /p:22,80,443        # dial .0-.255 on three ports
@@ -147,7 +154,10 @@ matrix hex-rain backdrop, a CRT power-on animation, VGA scanlines, chromatic
 aberration with periodic glitch tearing and TV static, a faux-CRT bezel, and a
 fake BIOS/POST boot sequence before the carrier connects. It also synthesizes
 **modem audio** with WebAudio — dial tones, busy signals, and the unmistakable
-handshake screech on a carrier (toggle with **S**). (If `ghostty-web` can't be
+handshake screech on a carrier (toggle with **S**). The page scales the monitor
+to fill the window (⛶ for true fullscreen), and the **save** / **load** buttons
+let you download the current scan state (`.DAT`) and upload a previous one to
+resume — merged straight into the running scan. (If `ghostty-web` can't be
 reached, the page falls back to `xterm.js` automatically.)
 
 ## Games (standalone, no server)

@@ -2,7 +2,9 @@ package engine
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -49,8 +51,23 @@ func LoadDat(path string) (*DatFile, error) {
 		return nil, err
 	}
 	defer f.Close()
+	if err := d.readFrom(f); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
 
-	sc := bufio.NewScanner(f)
+// ParseDat reads a data file from r (used by the web upload path).
+func ParseDat(r io.Reader) (*DatFile, error) {
+	d := &DatFile{Results: map[string]Result{}}
+	if err := d.readFrom(r); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+func (d *DatFile) readFrom(r io.Reader) error {
+	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
@@ -80,7 +97,7 @@ func LoadDat(path string) (*DatFile, error) {
 			}
 		}
 	}
-	return d, sc.Err()
+	return sc.Err()
 }
 
 func parseRecord(fields []string) (Result, bool) {
@@ -115,6 +132,51 @@ func parseRecord(fields []string) (Result, bool) {
 	return r, true
 }
 
+// WriteTo serializes the data file to w (used by both Save and the web
+// download).
+func (d *DatFile) WriteTo(w io.Writer) (int64, error) {
+	cw := &countWriter{w: w}
+	bw := bufio.NewWriter(cw)
+	fmt.Fprintln(bw, "# ToneLoc/Go data file v1")
+	fmt.Fprintf(bw, "mask %s\n", d.Mask)
+	ports := make([]string, len(d.Ports))
+	for i, p := range d.Ports {
+		ports[i] = strconv.Itoa(int(p))
+	}
+	fmt.Fprintf(bw, "ports %s\n", strings.Join(ports, ","))
+	fmt.Fprintf(bw, "updated %s\n", d.Updated.UTC().Format(time.RFC3339))
+	keys := make([]string, 0, len(d.Results))
+	for k := range d.Results {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		r := d.Results[k]
+		fmt.Fprintf(bw, "r %s %s %d %d\n", r.Target(), responseName(r.Response), r.Rings, r.Tries)
+	}
+	err := bw.Flush()
+	return cw.n, err
+}
+
+type countWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (c *countWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	c.n += int64(n)
+	return n, err
+}
+
+// Bytes returns the serialized data file.
+func (d *DatFile) Bytes() []byte {
+	var b bytes.Buffer
+	d.Updated = time.Now()
+	_, _ = d.WriteTo(&b)
+	return b.Bytes()
+}
+
 // Save atomically writes the data file (write to a temp file, then rename), so
 // an interrupted autosave never corrupts an existing scan.
 func (d *DatFile) Save() error {
@@ -127,26 +189,7 @@ func (d *DatFile) Save() error {
 	if err != nil {
 		return err
 	}
-	w := bufio.NewWriter(f)
-	fmt.Fprintln(w, "# ToneLoc/Go data file v1")
-	fmt.Fprintf(w, "mask %s\n", d.Mask)
-	ports := make([]string, len(d.Ports))
-	for i, p := range d.Ports {
-		ports[i] = strconv.Itoa(int(p))
-	}
-	fmt.Fprintf(w, "ports %s\n", strings.Join(ports, ","))
-	fmt.Fprintf(w, "updated %s\n", d.Updated.UTC().Format(time.RFC3339))
-
-	keys := make([]string, 0, len(d.Results))
-	for k := range d.Results {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		r := d.Results[k]
-		fmt.Fprintf(w, "r %s %s %d %d\n", r.Target(), responseName(r.Response), r.Rings, r.Tries)
-	}
-	if err := w.Flush(); err != nil {
+	if _, err := d.WriteTo(f); err != nil {
 		f.Close()
 		return err
 	}

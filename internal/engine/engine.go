@@ -1,9 +1,11 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net/netip"
+	"path/filepath"
 	"time"
 )
 
@@ -13,10 +15,18 @@ import (
 // redial, notes) arrives through the exported methods, which are safe to call
 // from the input goroutine.
 type Engine struct {
-	job    Job
-	probe  Probe
-	dialer *Dialer
-	state  *State
+	job   Job
+	probe Probe
+	state *State
+
+	// The scan is a list of (mask, port) segments walked in order: mask-outer,
+	// port-inner, so a whole network is swept one port at a time, most-common
+	// port first. Each segment has its own zmap-go cyclic dialer over the
+	// addresses for that one port.
+	masks      []*Mask
+	segments   []segment
+	si         int // current segment index
+	curMaskIdx int // mask the current segment belongs to (drives the ToneMap)
 
 	ctrl    chan control
 	redial  bool
@@ -26,6 +36,13 @@ type Engine struct {
 	dat      *DatFile
 	dirty    bool
 	lastSave time.Time
+}
+
+type segment struct {
+	maskIdx int
+	mask    *Mask
+	port    uint16
+	dialer  *Dialer
 }
 
 type control struct {
@@ -51,7 +68,8 @@ const (
 // (no privileges, no network, no zmap), it logs why and falls back to the
 // simulator so the DOS experience -- and the web demo -- still runs.
 func New(ctx context.Context, job Job) (*Engine, error) {
-	if job.Mask == nil {
+	masks := job.maskList()
+	if len(masks) == 0 {
 		return nil, fmt.Errorf("job has no mask")
 	}
 	if len(job.Ports) == 0 {
@@ -63,51 +81,70 @@ func New(ctx context.Context, job Job) (*Engine, error) {
 	if job.MaxRings <= 0 {
 		job.MaxRings = 6
 	}
+	single := len(masks) == 1
 
-	dialer, err := NewDialer(job.Mask, job.Ports, job.Range, job.Seed)
-	if err != nil {
-		return nil, err
+	// Build the segment list and tally the total search space.
+	var segments []segment
+	var max uint64
+	for mi, m := range masks {
+		span := uint64(m.Span())
+		if single && job.Range != nil {
+			span = uint64(job.Range.Hi - job.Range.Lo + 1)
+		}
+		max += span * uint64(len(job.Ports))
+		for _, p := range job.Ports {
+			var rng *Range
+			if single {
+				rng = job.Range
+			}
+			d, err := NewDialer(m, []uint16{p}, rng, job.Seed)
+			if err != nil {
+				return nil, err
+			}
+			segments = append(segments, segment{maskIdx: mi, mask: m, port: p, dialer: d})
+		}
+	}
+	if job.Limit > 0 && job.Limit < max {
+		max = job.Limit
 	}
 
 	st := newState()
 	st.Backend = job.Backend
-	st.MaskText = job.Mask.Text()
+	st.MaskText = masks[0].Text()
 	st.DataFile = job.DataFile
-	st.tone = make([]uint8, job.Mask.Span())
-	st.toneSpan = int(job.Mask.Span())
-	st.Stats.Max = dialer.Total()
-	if job.Range != nil {
-		st.Stats.Max = uint64(job.Range.Hi-job.Range.Lo+1) * uint64(len(job.Ports))
-	}
-	if job.Limit > 0 && job.Limit < st.Stats.Max {
-		st.Stats.Max = job.Limit
-	}
+	st.tone = make([]uint8, masks[0].Span())
+	st.toneSpan = int(masks[0].Span())
+	st.Stats.Max = max
 
 	e := &Engine{
-		job:    job,
-		dialer: dialer,
-		state:  st,
-		ctrl:   make(chan control, 16),
-		done:   make(chan struct{}),
+		job:      job,
+		masks:    masks,
+		segments: segments,
+		state:    st,
+		ctrl:     make(chan control, 16),
+		done:     make(chan struct{}),
 	}
 
 	e.banner()
 
-	// Load any existing data file so an interrupted scan resumes where it left
-	// off, exactly like the original .DAT behaviour.
-	if path := datPathFor(job.DataFile); path != "" {
-		dat, err := LoadDat(path)
-		if err != nil {
+	// Always keep a DatFile in memory so the scan is recorded (and can be saved
+	// / downloaded). When a path is set we also load any prior results to resume,
+	// exactly like the original .DAT behaviour, and autosave back to it.
+	path := datPathFor(job.DataFile)
+	dat := &DatFile{Path: path, Results: map[string]Result{}}
+	if path != "" {
+		if loaded, err := LoadDat(path); err != nil {
 			e.logf("Could not read %s: %v", path, err)
-			dat = &DatFile{Path: path, Results: map[string]Result{}}
+		} else {
+			dat = loaded
 		}
-		dat.Mask = job.Mask.Text()
-		dat.Ports = job.Ports
-		e.dat = dat
-		if n := len(dat.Results); n > 0 {
-			e.seedFromDat(dat)
-			e.logf("Loaded %d previous results from %s", n, job.DataFile)
-		}
+	}
+	dat.Mask = masks[0].Text()
+	dat.Ports = job.Ports
+	e.dat = dat
+	if n := len(dat.Results); n > 0 {
+		e.seedFromDat(dat)
+		e.logf("Loaded %d previous results from %s", n, job.DataFile)
 	}
 
 	e.probe = e.selectProbe(ctx)
@@ -146,7 +183,7 @@ func (e *Engine) seedFromDat(dat *DatFile) {
 			e.state.Found = append(e.state.Found, entry)
 			e.state.hits = append(e.state.hits, entry)
 		}
-		if idx, ok := e.job.Mask.Index(r.Addr); ok {
+		if idx, ok := e.Mask().Index(r.Addr); ok {
 			e.state.markTone(int(idx), r.Response)
 		}
 	}
@@ -175,11 +212,45 @@ func (e *Engine) selectProbe(ctx context.Context) Probe {
 // State exposes the shared render state.
 func (e *Engine) State() *State { return e.state }
 
-// Mask is the address space being scanned (for the ToneMap to label cells).
-func (e *Engine) Mask() *Mask { return e.job.Mask }
+// Mask is the address space currently being scanned (for the ToneMap to label
+// cells); with multiple networks this is the one in flight.
+func (e *Engine) Mask() *Mask { return e.masks[e.curMaskIdx] }
 
-// Span is the number of addresses in the scan.
-func (e *Engine) Span() uint32 { return e.job.Mask.Span() }
+// Span is the number of addresses in the current mask.
+func (e *Engine) Span() uint32 { return e.masks[e.curMaskIdx].Span() }
+
+// nextTarget walks the segment list, switching the active mask (and resetting
+// the ToneMap grid) at each network boundary, and returns the next address to
+// dial.
+func (e *Engine) nextTarget() (netip.Addr, uint16, bool) {
+	for e.si < len(e.segments) {
+		seg := e.segments[e.si]
+		if seg.maskIdx != e.curMaskIdx {
+			e.switchMask(seg.maskIdx)
+		}
+		if addr, port, ok := seg.dialer.Next(); ok {
+			return addr, port, true
+		}
+		e.si++
+	}
+	return netip.Addr{}, 0, false
+}
+
+// switchMask points the ToneMap and stats at a new network as the scan moves on
+// to it. Each network is swept fully (all ports) before the next, so the grid
+// can simply be reset here.
+func (e *Engine) switchMask(mi int) {
+	m := e.masks[mi]
+	e.state.mu.Lock()
+	e.state.tone = make([]uint8, m.Span())
+	e.state.toneSpan = int(m.Span())
+	e.state.MaskText = m.Text()
+	e.state.mu.Unlock()
+	e.curMaskIdx = mi
+	if len(e.masks) > 1 {
+		e.logf("Scanning %s ...", m.Text())
+	}
+}
 
 // Done is closed when the scan loop exits.
 func (e *Engine) Done() <-chan struct{} { return e.done }
@@ -248,7 +319,7 @@ func (e *Engine) Run(ctx context.Context) {
 			tgt = *pending
 			pending = nil
 		} else {
-			addr, port, ok := e.dialer.Next()
+			addr, port, ok := e.nextTarget()
 			if !ok {
 				e.logf("All %d targets exhausted", e.state.Stats.Max)
 				e.finish("ToneLoc Exiting ...")
@@ -260,7 +331,7 @@ func (e *Engine) Run(ctx context.Context) {
 		if e.job.excluded(tgt.addr) {
 			continue // /X excluded -- silently skip, like the original
 		}
-		if pending == nil && e.dat != nil && e.dat.Has(tgt.addr.String()+":"+itoa(tgt.port)) {
+		if pending == nil && e.datHas(tgt.addr.String()+":"+itoa(tgt.port)) {
 			continue // already dialed in a previous run -- resume past it
 		}
 		if e.job.Limit > 0 && uint64(e.state.Stats.Dialed) >= e.job.Limit {
@@ -298,7 +369,10 @@ func (e *Engine) autosave(force bool) {
 	if !force && time.Since(e.lastSave) < 15*time.Second {
 		return
 	}
-	if err := e.dat.Save(); err != nil {
+	e.state.mu.Lock() // serialize with web export/import
+	err := e.dat.Save()
+	e.state.mu.Unlock()
+	if err != nil {
 		e.logf("Autosave failed: %v", err)
 		return
 	}
@@ -307,6 +381,87 @@ func (e *Engine) autosave(force bool) {
 	if !force {
 		e.log("Autosaving")
 	}
+}
+
+// datHas reports (under lock) whether a target has already been recorded.
+func (e *Engine) datHas(target string) bool {
+	if e.dat == nil {
+		return false
+	}
+	e.state.mu.Lock()
+	defer e.state.mu.Unlock()
+	return e.dat.Has(target)
+}
+
+// ExportDat returns a filename and the serialized data file for the web
+// download (a snapshot of everything dialed so far).
+func (e *Engine) ExportDat() (string, []byte) {
+	e.state.mu.Lock()
+	defer e.state.mu.Unlock()
+	name := filepath.Base(e.job.DataFile)
+	if name == "" || name == "." {
+		name = "toneloc.DAT"
+	}
+	if e.dat == nil {
+		d := &DatFile{Mask: e.masks[0].Text(), Ports: e.job.Ports, Results: map[string]Result{}}
+		return name, d.Bytes()
+	}
+	return name, e.dat.Bytes()
+}
+
+// ImportDat merges an uploaded data file into the running scan: known targets
+// are skipped from here on and the stats/ToneMap/Hall of Fame reflect them.
+// Returns how many new results were merged.
+func (e *Engine) ImportDat(data []byte) (int, error) {
+	d, err := ParseDat(bytes.NewReader(data))
+	if err != nil {
+		return 0, err
+	}
+	e.state.mu.Lock()
+	if e.dat == nil {
+		e.dat = &DatFile{Mask: e.masks[0].Text(), Ports: e.job.Ports, Results: map[string]Result{}}
+	}
+	merged := 0
+	st := &e.state.Stats
+	for k, r := range d.Results {
+		if _, ok := e.dat.Results[k]; ok {
+			continue
+		}
+		e.dat.Results[k] = r
+		merged++
+		st.Dialed++
+		switch r.Response {
+		case RespCarrier:
+			st.Carriers++
+		case RespTone:
+			st.Tones++
+		case RespVoice:
+			st.Voice++
+		case RespBusy:
+			st.Busy++
+		case RespNoDialtone:
+			st.NoDialtone++
+		case RespRingout:
+			st.Ringout++
+		case RespTimeout:
+			st.Timeout++
+		}
+		if r.Response.Found() {
+			entry := FoundEntry{Target: r.Target(), Resp: r.Response, When: d.Updated}
+			e.state.Found = append(e.state.Found, entry)
+			if len(e.state.Found) > 5 {
+				e.state.Found = e.state.Found[len(e.state.Found)-5:]
+			}
+			e.state.hits = append(e.state.hits, entry)
+		}
+		if idx, ok := e.Mask().Index(r.Addr); ok {
+			e.state.markTone(int(idx), r.Response)
+		}
+	}
+	e.dirty = true
+	e.state.mu.Unlock()
+	e.logf("Loaded %d result(s) from uploaded state", merged)
+	return merged, nil
 }
 
 type target struct {
@@ -485,7 +640,7 @@ func (e *Engine) record(res Result) {
 		e.dat.record(res)
 		e.dirty = true
 	}
-	if idx, ok := e.job.Mask.Index(res.Addr); ok {
+	if idx, ok := e.Mask().Index(res.Addr); ok {
 		e.state.markTone(int(idx), res.Response)
 	}
 	// dials/hour
@@ -566,7 +721,18 @@ func (e *Engine) finish(msg string) {
 func (e *Engine) banner() {
 	e.logf("ToneLoc started on %s", time.Now().Format("02-Jan-06"))
 	e.logf("Data file:   %s", e.job.DataFile)
-	e.logf("Mask used:   %s", e.job.Mask.Text())
+	if len(e.masks) == 1 {
+		e.logf("Mask used:   %s", e.masks[0].Text())
+	} else {
+		e.logf("Networks:    %d local network(s)", len(e.masks))
+		for i, m := range e.masks {
+			if i >= 6 {
+				e.logf("  ... and %d more", len(e.masks)-6)
+				break
+			}
+			e.logf("  %s", m.Text())
+		}
+	}
 	ports := ""
 	for i, p := range e.job.Ports {
 		if i > 0 {

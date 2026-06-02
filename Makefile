@@ -1,7 +1,6 @@
 # ToneLoc/Go -- IPv4 war-dialer with a 90s MS-DOS vibe, powered by zmap-go.
 #
-# The module builds against the sibling github.com/hdm/zmap-go checkout via a
-# replace directive, so keep the two repos side by side (../zmap-go).
+# zmap-go is imported as a normal Go module; no sibling checkout needed.
 
 GO      ?= go
 BIN     ?= toneloc

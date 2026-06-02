@@ -76,9 +76,13 @@
   #status{position:absolute;top:8px;right:14px;z-index:9;font-size:11px;color:#555;}
   #status.live{color:var(--green);text-shadow:0 0 6px var(--green);}
 
-  #fsbtn{position:fixed;top:10px;left:12px;z-index:20;background:rgba(20,20,20,.6);color:#6a6a6a;
-    border:1px solid #333;border-radius:6px;font:14px monospace;padding:4px 9px;cursor:pointer;}
-  #fsbtn:hover{color:var(--green);border-color:var(--green);}
+  #tools{position:fixed;top:10px;left:12px;z-index:20;display:flex;gap:6px;}
+  #tools button{background:rgba(20,20,20,.6);color:#6a6a6a;border:1px solid #333;border-radius:6px;
+    font:14px monospace;padding:4px 9px;cursor:pointer;}
+  #tools button:hover{color:var(--green);border-color:var(--green);}
+  #toast{position:fixed;top:46px;left:12px;z-index:20;color:var(--green);font:12px monospace;
+    text-shadow:0 0 6px var(--phos);opacity:0;transition:opacity .3s;}
+  #toast.show{opacity:1;}
 
   #boot{position:absolute;inset:0;z-index:8;padding:16px 18px;color:var(--green);
     background:#000;font-size:14px;line-height:1.45;white-space:pre-wrap;text-shadow:0 0 6px var(--phos);}
@@ -89,7 +93,13 @@
 </head>
 <body>
 <canvas id="matrix"></canvas>
-<button id="fsbtn" title="toggle fullscreen (or press the screen)">⛶ fullscreen</button>
+<div id="tools">
+  <button id="fsbtn" title="toggle fullscreen">⛶ fullscreen</button>
+  <button id="savebtn" title="download current scan state (.DAT)">▼ save</button>
+  <button id="loadbtn" title="upload a previous scan state to resume">▲ load</button>
+  <input id="loadfile" type="file" accept=".DAT,.dat,application/octet-stream" style="display:none">
+</div>
+<div id="toast"></div>
 <div id="frame">
   <div id="bezel">
     <div id="screen" class="boot">
@@ -234,6 +244,7 @@ async function makeTerminal(){
   }
 }
 
+let SID = null; // per-session id for save/load, delivered by the server
 (async () => {
   document.getElementById('screen').addEventListener('animationend', e=>{
     if(e.animationName==='poweron') document.getElementById('screen').classList.remove('boot');
@@ -258,6 +269,8 @@ async function makeTerminal(){
   ws.onerror = () => setStatus('error',false);
   ws.onmessage = (e) => {
     let data = typeof e.data==='string' ? e.data : new TextDecoder().decode(e.data);
+    // Capture the session id (for save/load) and play modem-sound cues; strip both.
+    data = data.replace(/\x1b\]1338;([0-9a-f]+)\x07/g, (_, id) => { SID = id; return ''; });
     data = data.replace(/\x1b\]1337;([a-z]+)\x07/g, (_, ev) => { try { Modem[ev] && Modem[ev](); } catch(_){} return ''; });
     if (data) term.write(data);
   };
@@ -267,6 +280,23 @@ async function makeTerminal(){
   const wake = () => Modem.resume();
   mount.addEventListener('click', ()=>{ mount.focus(); wake(); });
   addEventListener('keydown', wake, { once:false });
+
+  // ---- Save / load scan state ----
+  const toast = (m)=>{ const t=document.getElementById('toast'); t.textContent=m; t.classList.add('show');
+    setTimeout(()=>t.classList.remove('show'), 2600); };
+  document.getElementById('savebtn').addEventListener('click', ()=>{
+    if(!SID){ toast('not connected yet'); return; }
+    location.href = '/save?s=' + SID; toast('saving scan state…');
+  });
+  const fileInput = document.getElementById('loadfile');
+  document.getElementById('loadbtn').addEventListener('click', ()=>{ if(!SID){toast('not connected yet');return;} fileInput.click(); });
+  fileInput.addEventListener('change', async ()=>{
+    const f = fileInput.files[0]; if(!f) return;
+    try{ const res = await fetch('/load?s='+SID, { method:'POST', body: await f.arrayBuffer() });
+      const j = await res.json(); toast('merged '+(j.merged||0)+' result(s) — resuming'); }
+    catch(err){ toast('load failed'); }
+    fileInput.value = '';
+  });
 })();
 </script>
 </body>

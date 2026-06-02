@@ -10,9 +10,10 @@ import (
 // the original command line (DataFile /M /R /X /p ...).
 type Job struct {
 	DataFile  string        // .DAT-style persistence file (named like the original)
-	Mask      *Mask         // address space to dial
-	Ports     []uint16      // ports to "dial" on each address
-	Range     *Range        // optional /R restriction
+	Mask      *Mask         // address space to dial (single-mask convenience)
+	Masks     []*Mask       // multiple address spaces (e.g. every local network)
+	Ports     []uint16      // ports to "dial" on each address, in priority order
+	Range     *Range        // optional /R restriction (single-mask only)
 	Excludes  []*Mask       // optional /X exclude masks (subset of Mask)
 	WaitDelay time.Duration // how long to listen on each dial (the meter length)
 	MaxRings  int           // give up (Ringout) after this many rings
@@ -20,6 +21,22 @@ type Job struct {
 	Limit     uint64        // max dials this run (0 = whole space)
 	Backend   string        // "sim", "connect" or "zmap"
 }
+
+// maskList returns the masks to scan, preferring Masks but falling back to the
+// single Mask.
+func (j *Job) maskList() []*Mask {
+	if len(j.Masks) > 0 {
+		return j.Masks
+	}
+	if j.Mask != nil {
+		return []*Mask{j.Mask}
+	}
+	return nil
+}
+
+// CommonPorts is the default port set when none is given: the services worth
+// knocking on first, most-common first (web, SSH, Windows, RDP, mail, ...).
+var CommonPorts = []uint16{80, 443, 22, 135, 445, 3389, 8080, 23, 21, 25, 110, 143, 53, 3306, 8443}
 
 // Probe dials a single target and returns ToneLoc's verdict. Implementations
 // should honour ctx cancellation (the user hitting space/ESC mid-dial) and

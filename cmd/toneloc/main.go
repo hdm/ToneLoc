@@ -10,6 +10,8 @@ package main
 import (
 	"context"
 	"fmt"
+	"net"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -43,11 +45,11 @@ type options struct {
 }
 
 func run(args []string) error {
-	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "/?" {
+	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "/?") {
 		usage()
 		return nil
 	}
-	if args[0] == "-V" || args[0] == "--version" {
+	if len(args) > 0 && (args[0] == "-V" || args[0] == "--version") {
 		fmt.Printf("ToneLoc/Go %s -- IPv4 war-dialer powered by zmap-go\n", version)
 		return nil
 	}
@@ -60,6 +62,12 @@ func run(args []string) error {
 			return err
 		}
 		return web.ServeGame(addr, dir)
+	}
+
+	// No arguments: sweep every local network this machine is on, hitting the
+	// most common ports first.
+	if len(args) == 0 {
+		return runLocalScan()
 	}
 
 	opt, err := parseArgs(args)
@@ -297,6 +305,77 @@ func findGameDir() (string, error) {
 	return "", fmt.Errorf("game/ directory not found (run from the ToneLoc repo, or open game/index.html directly)")
 }
 
+// runLocalScan discovers the networks this machine is attached to and scans
+// them with a real TCP connect() sweep, common ports first.
+func runLocalScan() error {
+	masks, err := localNetworks()
+	if err != nil || len(masks) == 0 {
+		return fmt.Errorf("could not detect any local networks; give a target, e.g. `toneloc 192.168.1.X` (try --help)")
+	}
+	fmt.Fprintf(os.Stderr, "No target given -- sweeping %d local network(s) on common ports (%s)...\n",
+		len(masks), portsLabel(engine.CommonPorts))
+	job := engine.Job{
+		DataFile:  "LOCALNET.DAT",
+		Masks:     masks,
+		Ports:     engine.CommonPorts,
+		Backend:   "connect", // real, privilege-free discovery of your own LAN
+		WaitDelay: time.Second,
+		MaxRings:  4,
+	}
+	return runTerminal(job)
+}
+
+// localNetworks returns the IPv4 networks attached to this host's interfaces,
+// skipping loopback/link-local and clamping anything wider than a /16 down to
+// the host's /24 so a stray big prefix doesn't launch a million-host sweep.
+func localNetworks() ([]*engine.Mask, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return nil, err
+	}
+	var masks []*engine.Mask
+	seen := map[string]bool{}
+	for _, a := range addrs {
+		ipnet, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		ip4 := ipnet.IP.To4()
+		if ip4 == nil || ip4.IsLoopback() || ip4.IsLinkLocalUnicast() {
+			continue
+		}
+		addr, ok := netip.AddrFromSlice(ip4)
+		if !ok {
+			continue
+		}
+		ones, _ := ipnet.Mask.Size()
+		if ones < 24 { // clamp huge ranges to the host's own /24
+			ones = 24
+		}
+		pfx := netip.PrefixFrom(addr, ones).Masked()
+		if seen[pfx.String()] {
+			continue
+		}
+		seen[pfx.String()] = true
+		if m, err := engine.ParseMask(pfx.String()); err == nil {
+			masks = append(masks, m)
+		}
+	}
+	return masks, nil
+}
+
+func portsLabel(ps []uint16) string {
+	parts := make([]string, 0, len(ps))
+	for i, p := range ps {
+		if i >= 5 {
+			parts = append(parts, "...")
+			break
+		}
+		parts = append(parts, strconv.Itoa(int(p)))
+	}
+	return strings.Join(parts, ",")
+}
+
 func runTerminal(job engine.Job) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -372,6 +451,9 @@ func usage() {
 
 USAGE:
   toneloc <DataFile|Mask> [/M:mask] [/R:lo-hi] [/X:exmask] [/p:ports] [flags]
+
+  With NO arguments, ToneLoc sweeps every local network this machine is on
+  (TCP connect scan), hitting the most common ports first (80,443,22,135,...).
 
 MASKS (the IP equivalent of the original 555-1XXX phone masks):
   192.168.1.X        dial 192.168.1.0 .. 192.168.1.255
