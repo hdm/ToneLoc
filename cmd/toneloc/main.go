@@ -14,7 +14,6 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +21,7 @@ import (
 
 	"golang.org/x/term"
 
+	tonelocassets "github.com/hdm/toneloc"
 	"github.com/hdm/toneloc/internal/engine"
 	"github.com/hdm/toneloc/internal/tui"
 	"github.com/hdm/toneloc/internal/web"
@@ -42,6 +42,10 @@ type options struct {
 	useWeb   bool
 	gameAddr string
 	useGame  bool
+	tls      bool
+	domain   string
+	tlsCert  string
+	tlsKey   string
 }
 
 func run(args []string) error {
@@ -55,13 +59,14 @@ func run(args []string) error {
 	}
 
 	// The standalone JS game needs no mask, so handle --game before the rest of
-	// the command line is parsed.
+	// the command line is parsed. It is served from the binary's embedded assets.
 	if addr, ok := gameFlag(args); ok {
-		dir, err := findGameDir()
+		fsys, err := tonelocassets.GameFS()
 		if err != nil {
 			return err
 		}
-		return web.ServeGame(addr, dir)
+		tls, domain, cert, key := tlsFlagsFromArgs(args)
+		return web.ServeGameFS(buildOptions(addr, ":8090", tls, domain, cert, key), fsys)
 	}
 
 	// Resume a previous scan from its session log.
@@ -81,13 +86,48 @@ func run(args []string) error {
 	}
 
 	if opt.useWeb {
-		addr := opt.webAddr
-		if addr == "" {
-			addr = ":8080"
-		}
-		return web.Serve(addr, opt.job)
+		return web.Serve(buildOptions(opt.webAddr, ":8080", opt.tls, opt.domain, opt.tlsCert, opt.tlsKey), opt.job)
 	}
 	return runTerminal(opt.job)
+}
+
+// buildOptions assembles the web server options, defaulting the listen address
+// to defaultPlain only for plain HTTP (TLS/ACME default to :443 in web.listen).
+func buildOptions(addr, defaultPlain string, tls bool, domain, cert, key string) web.Options {
+	o := web.Options{Addr: addr, TLS: tls || cert != "", Domain: domain, CertFile: cert, KeyFile: key}
+	if o.Addr == "" && !o.TLS {
+		o.Addr = defaultPlain
+	}
+	return o
+}
+
+// tlsFlagsFromArgs extracts --tls / --domain / --tls-cert / --tls-key, for the
+// --game path which is handled before the main flag parser.
+func tlsFlagsFromArgs(args []string) (tls bool, domain, cert, key string) {
+	val := func(i int, name string) string {
+		a := args[i]
+		if eq := strings.IndexByte(a, '='); eq >= 0 {
+			return a[eq+1:]
+		}
+		if i+1 < len(args) {
+			return args[i+1]
+		}
+		_ = name
+		return ""
+	}
+	for i, a := range args {
+		switch {
+		case a == "--tls":
+			tls = true
+		case a == "--domain" || strings.HasPrefix(a, "--domain="):
+			domain = val(i, "domain")
+		case a == "--tls-cert" || strings.HasPrefix(a, "--tls-cert="):
+			cert = val(i, "tls-cert")
+		case a == "--tls-key" || strings.HasPrefix(a, "--tls-key="):
+			key = val(i, "tls-key")
+		}
+	}
+	return
 }
 
 // parseArgs understands the original ToneLoc slash-options (/M /R /D /X /p with
@@ -225,6 +265,32 @@ func parseArgs(args []string) (options, error) {
 					i++
 					opt.webAddr = args[i]
 				}
+			case "tls":
+				opt.tls = true
+			case "domain":
+				v, err := needVal()
+				if err != nil {
+					return opt, err
+				}
+				opt.domain = v
+			case "tls-cert":
+				v, err := needVal()
+				if err != nil {
+					return opt, err
+				}
+				opt.tlsCert = v
+			case "tls-key":
+				v, err := needVal()
+				if err != nil {
+					return opt, err
+				}
+				opt.tlsKey = v
+			case "restore":
+				v, err := needVal() // handled earlier in run(); accept here too
+				if err != nil {
+					return opt, err
+				}
+				_ = v
 			default:
 				return opt, fmt.Errorf("unknown flag --%s", base)
 			}
@@ -285,29 +351,6 @@ func gameFlag(args []string) (string, bool) {
 		}
 	}
 	return "", false
-}
-
-// findGameDir locates the game/ directory next to the working dir or binary.
-func findGameDir() (string, error) {
-	roots := []string{"."}
-	if exe, err := os.Executable(); err == nil {
-		roots = append(roots, filepath.Dir(exe))
-	}
-	for _, root := range roots {
-		dir := root
-		for i := 0; i < 6; i++ {
-			cand := filepath.Join(dir, "game")
-			if st, err := os.Stat(filepath.Join(cand, "index.html")); err == nil && !st.IsDir() {
-				return cand, nil
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-	}
-	return "", fmt.Errorf("game/ directory not found (run from the ToneLoc repo, or open game/index.html directly)")
 }
 
 // runLocalScan discovers the networks this machine is attached to and scans
@@ -528,10 +571,15 @@ FLAGS:
   --seed N                     reproducible scan order (0 = random)
   --limit N                    stop after N dials
   --web [addr]                 serve the UI in a browser (ghostty.js), default :8080
-  --game [addr]                serve the standalone JS game, default :8090
-                               (or just open game/index.html in a browser)
+  --game [addr]                serve the standalone JS game (embedded), default :8090
+  --tls                        serve HTTPS; issues an ACME cert for --domain
+  --domain <name>              domain to issue the ACME certificate for
+  --tls-cert <file> --tls-key <file>   use a static cert/key instead of ACME
   --restore <id>               resume a previous scan from its session log
   -V, --help
+
+  (With --tls/--domain, the server listens on :443 and answers ACME HTTP-01
+  challenges on :80 -- both must be reachable from the internet.)
 
 RECON PIPELINE:
   Open TCP ports come from connect/zmap; nerva finds open UDP ports and

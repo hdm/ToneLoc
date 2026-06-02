@@ -7,3 +7,4 @@
 toneloc-*.session
 toneloc-*.session.*
 /LOCALNET.DAT
+/toneloc-acme/

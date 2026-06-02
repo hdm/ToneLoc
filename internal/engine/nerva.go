@@ -1,103 +1,14 @@
 package engine
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
 	"net/netip"
-	"os/exec"
-	"strconv"
-	"strings"
 )
 
-// nervaExec drives the real nerva CLI (github.com/praetorian-inc/nerva). nerva
-// assumes the port is reachable and reports the application/transport/metadata;
-// with -U it also probes UDP. We invoke it per target with --json.
-type nervaExec struct{ bin string }
-
-type nervaJSON struct {
-	Host      string         `json:"host"`
-	IP        string         `json:"ip"`
-	Port      int            `json:"port"`
-	Protocol  string         `json:"protocol"`
-	Transport string         `json:"transport"`
-	Banner    string         `json:"banner"`
-	Metadata  map[string]any `json:"metadata"`
-}
-
-func (n *nervaExec) Name() string { return "nerva" }
-
-func (n *nervaExec) Fingerprint(ctx context.Context, ip string, port uint16) (Fingerprint, bool) {
-	out, err := exec.CommandContext(ctx, n.bin, "-t", ip+":"+itoa(port), "--json", "-w", "2000").Output()
-	if err != nil {
-		return Fingerprint{}, false
-	}
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var r nervaJSON
-		if json.Unmarshal([]byte(line), &r) != nil {
-			continue
-		}
-		fp := Fingerprint{App: r.Protocol, Banner: r.Banner}
-		if v, ok := r.Metadata["version"].(string); ok {
-			fp.Version = v
-		}
-		return fp, fp.App != ""
-	}
-	return Fingerprint{}, false
-}
-
-// ScanUDP runs nerva with -U over host:port candidates and emits the ones that
-// answer as UDP services.
-func (n *nervaExec) ScanUDP(ctx context.Context, addrs []netip.Addr, ports []uint16, emit func(Service)) {
-	// Feed candidates on stdin (host:port per line); nerva reports responders.
-	var sb strings.Builder
-	for _, a := range addrs {
-		for _, p := range ports {
-			sb.WriteString(a.String())
-			sb.WriteByte(':')
-			sb.WriteString(itoa(p))
-			sb.WriteByte('\n')
-		}
-	}
-	cmd := exec.CommandContext(ctx, n.bin, "-U", "--json", "-w", "1500")
-	cmd.Stdin = strings.NewReader(sb.String())
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		return
-	}
-	if cmd.Start() != nil {
-		return
-	}
-	sc := bufio.NewScanner(stdout)
-	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
-	for sc.Scan() {
-		var r nervaJSON
-		if json.Unmarshal(sc.Bytes(), &r) != nil {
-			continue
-		}
-		addr, _ := netip.ParseAddr(r.IP)
-		if !addr.IsValid() {
-			addr, _ = netip.ParseAddr(r.Host)
-		}
-		app := r.Protocol
-		if app == "" {
-			app = appForPort("udp", uint16(r.Port))
-		}
-		emit(Service{Addr: addr, IP: r.IP, Port: uint16(r.Port), Proto: "udp",
-			App: app, Banner: r.Banner, Brutable: bruteProtocol(app) != ""})
-	}
-	cmd.Wait()
-}
-
-// --- simulator ------------------------------------------------------------
-
-// simTools is the simulated nerva+brutus used when the binaries are absent or
-// the backend is "sim" -- so the recon pipeline, the UI, and the game all work
-// with no network and no external tools.
+// simTools is the simulated nerva+brutus used when the backend is "sim" (and in
+// the game) -- so the recon pipeline, the UI, and the game all work with no
+// network and no live services. The real tools are the nervaLib/brutusLib
+// library adapters in nervalib.go / brutuslib.go.
 type simTools struct{ seed uint64 }
 
 func newSimTools(seed uint64) *simTools {
@@ -165,5 +76,3 @@ func (s *simTools) ScanUDP(ctx context.Context, addrs []netip.Addr, ports []uint
 }
 
 // Supports / Brute (the simulated brutus) live in brutus.go.
-
-var _ = strconv.Itoa

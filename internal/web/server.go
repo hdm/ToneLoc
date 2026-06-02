@@ -9,15 +9,18 @@ package web
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"net/http"
 	"sync"
 	"time"
 
+	"golang.org/x/crypto/acme/autocert"
 	"golang.org/x/net/websocket"
 
 	"github.com/hdm/toneloc/internal/engine"
@@ -31,9 +34,22 @@ var indexHTML []byte
 // HTTP endpoints can reach the scan a given browser tab is running.
 var sessions sync.Map // id -> *engine.Engine
 
-// Serve starts the HTTP server on addr. Every WebSocket client gets a fresh,
+// Options controls how the HTTP(S) server listens.
+//
+//   - plain HTTP:   {Addr: ":8080"}
+//   - static certs: {Addr: ":443", CertFile: "...", KeyFile: "..."}
+//   - ACME (Let's Encrypt): {TLS: true, Domain: "scan.example.com"}
+type Options struct {
+	Addr     string
+	TLS      bool   // enable HTTPS (ACME unless CertFile/KeyFile are set)
+	Domain   string // ACME domain to issue a certificate for
+	CertFile string // static certificate (overrides ACME)
+	KeyFile  string // static key (overrides ACME)
+}
+
+// Serve starts the ghostty.js web UI. Every WebSocket client gets a fresh,
 // independent scan of the same job.
-func Serve(addr string, job engine.Job) error {
+func Serve(opts Options, job engine.Job) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -49,10 +65,62 @@ func Serve(addr string, job engine.Job) error {
 	mux.HandleFunc("/save", handleSave)
 	mux.HandleFunc("/load", handleLoad)
 
-	fmt.Printf("ToneLoc/Go web -- open http://%s/ in your browser\n", friendly(addr))
 	fmt.Printf("Backend: %s   Mask: %s   Ports: %v\n", job.Backend, maskLabel(job), job.Ports)
-	return http.ListenAndServe(addr, mux)
+	return listen(opts, mux, "web UI")
 }
+
+// ServeGameFS serves the standalone JS game from an embedded filesystem, so the
+// single binary needs no game/ directory on disk.
+func ServeGameFS(opts Options, fsys fs.FS) error {
+	mux := http.NewServeMux()
+	mux.Handle("/", http.FileServerFS(fsys))
+	fmt.Println("(serving the standalone JS game from embedded assets; no backend)")
+	return listen(opts, mux, "game")
+}
+
+// listen binds the server per Options: ACME-issued HTTPS for a domain, static
+// cert/key, or plain HTTP.
+func listen(opts Options, mux http.Handler, label string) error {
+	scheme := "http"
+	addr := opts.Addr
+
+	switch {
+	case opts.CertFile != "" && opts.KeyFile != "":
+		if addr == "" {
+			addr = ":443"
+		}
+		scheme = "https"
+		fmt.Printf("ToneLoc/Go %s -- %s://%s/  (cert %s)\n", label, scheme, friendly(addr), opts.CertFile)
+		srv := &http.Server{Addr: addr, Handler: mux}
+		return srv.ListenAndServeTLS(opts.CertFile, opts.KeyFile)
+
+	case opts.TLS && opts.Domain != "":
+		if addr == "" {
+			addr = ":443"
+		}
+		scheme = "https"
+		m := &autocert.Manager{
+			Prompt:     autocert.AcceptTOS,
+			HostPolicy: autocert.HostWhitelist(opts.Domain),
+			Cache:      autocert.DirCache("toneloc-acme"),
+		}
+		// ACME HTTP-01 challenges + redirect to HTTPS on :80.
+		go func() { _ = http.ListenAndServe(":80", m.HTTPHandler(nil)) }()
+		fmt.Printf("ToneLoc/Go %s -- %s://%s/  (ACME cert for %s; needs :80 and :443 reachable)\n",
+			label, scheme, opts.Domain, opts.Domain)
+		srv := &http.Server{Addr: addr, Handler: mux, TLSConfig: m.TLSConfig()}
+		return srv.ListenAndServeTLS("", "")
+
+	default:
+		if addr == "" {
+			addr = ":8080"
+		}
+		fmt.Printf("ToneLoc/Go %s -- open http://%s/ in your browser\n", label, friendly(addr))
+		return http.ListenAndServe(addr, mux)
+	}
+}
+
+var _ = tls.VersionTLS12
 
 func maskLabel(job engine.Job) string {
 	if job.Mask != nil {
@@ -106,16 +174,6 @@ func newSessionID() string {
 	var b [8]byte
 	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
-}
-
-// ServeGame serves the standalone, server-free JavaScript game (the game/
-// directory: index.html, toneloc.js, seed.js) as static files. The game needs
-// no backend -- this is purely a convenience so you don't have to open the file
-// by hand. The same files also run straight from file:// in any browser.
-func ServeGame(addr, dir string) error {
-	fmt.Printf("ToneLoc/Go THE GAME -- open http://%s/ in your browser\n", friendly(addr))
-	fmt.Printf("(static files from %s; no backend, the simulation runs in your browser)\n", dir)
-	return http.ListenAndServe(addr, http.FileServer(http.Dir(dir)))
 }
 
 func serveSession(conn *websocket.Conn, job engine.Job) {

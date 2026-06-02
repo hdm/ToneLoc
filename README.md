@@ -56,7 +56,7 @@ go install github.com/hdm/toneloc/cmd/toneloc@latest
 # or, from a clone:  go build -o toneloc ./cmd/toneloc   (or: make)
 ```
 
-Requires Go 1.25+.
+Requires Go 1.26+ (brutus needs it). nerva, brutus and zmap-go are all imported as Go modules, so this is a single self-contained binary.
 
 ## Usage
 
@@ -106,11 +106,10 @@ Open TCP ports are only the start. ToneLoc runs a four-tool pipeline:
 | **[nerva](https://github.com/praetorian-inc/nerva)** | find open **UDP** ports, and **fingerprint** the application/banner on every service |
 | **[brutus](https://github.com/praetorian-inc/brutus)** | test **common credentials** against any service whose protocol it supports |
 
-nerva and brutus are auto-detected on your `PATH` (`go install
-github.com/praetorian-inc/nerva/cmd/nerva@latest` and
-`.../brutus/cmd/brutus@latest`); when they're absent — or in `sim` mode and the
-game — ToneLoc uses built-in simulators, so the whole flow works with no tools
-and no network.
+nerva and brutus are **compiled in as Go libraries** — ToneLoc is a single
+self-contained binary, no external tools to install. In `sim` mode (and the
+game) it uses built-in simulators instead, so the whole flow still works with
+no network.
 
 Every discovered service is summarized in the **Services** view (cycle with
 **M**). Select one and press **ENTER** for full detail; press **B** to launch
@@ -183,6 +182,27 @@ the prior history, so you can stop and pick a scan back up. It autosaves every
 toneloc 203.0.113.X --web :8080
 # → open http://localhost:8080/
 ```
+
+### HTTPS / TLS
+
+For a publicly reachable instance, serve over HTTPS. With `--tls --domain` the
+server gets a free **Let's Encrypt (ACME)** certificate automatically — it
+listens on `:443` and answers HTTP-01 challenges on `:80` (both must be
+reachable from the internet):
+
+```sh
+toneloc 203.0.113.X --web --tls --domain scan.example.com
+```
+
+Or bring your own certificate instead of ACME:
+
+```sh
+toneloc 203.0.113.X --web --tls-cert fullchain.pem --tls-key privkey.pem
+```
+
+Both work for the game too (`toneloc --game --tls --domain play.example.com`).
+The web UI and the game are served from assets **embedded in the binary**, so
+there are no files to deploy alongside it.
 
 The browser loads [`ghostty-web`](https://github.com/coder/ghostty-web) — the
 xterm.js-compatible WASM build of Ghostty's VT100 emulator — from a CDN and

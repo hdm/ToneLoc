@@ -4,7 +4,6 @@ import (
 	"context"
 	"hash/fnv"
 	"net/netip"
-	"os/exec"
 )
 
 // Fingerprint is what nerva tells us about a service.
@@ -46,34 +45,16 @@ type Toolkit struct {
 // commonUDPPorts are the UDP services nerva knocks on by default.
 var commonUDPPorts = []uint16{53, 123, 161, 137, 138, 500, 1900, 5353, 514, 69}
 
-// NewToolkit selects real (exec'd) nerva/brutus when available, otherwise
-// simulated equivalents. backend=="sim" forces the simulator for everything so
-// the demo and game never touch the network.
+// NewToolkit returns the recon tools. nerva and brutus are compiled in as Go
+// libraries (single binary, no exec). backend=="sim" uses the built-in
+// simulators so the demo and game never touch the network; any other backend
+// uses the real nerva/brutus libraries.
 func NewToolkit(backend string, seed uint64) Toolkit {
 	if backend == "sim" {
 		sim := newSimTools(seed)
 		return Toolkit{Finger: sim, UDP: sim, Brute: sim, Names: "simulated nerva+brutus"}
 	}
-	tk := Toolkit{}
-	names := ""
-	if path, err := exec.LookPath("nerva"); err == nil {
-		n := &nervaExec{bin: path}
-		tk.Finger, tk.UDP = n, n
-		names = "nerva"
-	} else {
-		sim := newSimTools(seed)
-		tk.Finger, tk.UDP = sim, sim
-		names = "nerva(sim)"
-	}
-	if path, err := exec.LookPath("brutus"); err == nil {
-		tk.Brute = &brutusExec{bin: path}
-		names += ", brutus"
-	} else {
-		tk.Brute = newSimTools(seed)
-		names += ", brutus(sim)"
-	}
-	tk.Names = names
-	return tk
+	return Toolkit{Finger: nervaLib{}, UDP: nervaLib{}, Brute: brutusLib{}, Names: "nerva+brutus (library)"}
 }
 
 // --- shared helpers -------------------------------------------------------
