@@ -65,6 +65,10 @@ func TestModeToggleAndEscQuit(t *testing.T) {
 	if app.mode != modeHallOfFame {
 		t.Fatal("M again should switch to Hall of Fame")
 	}
+	app.feed('m')
+	if app.mode != modeServices {
+		t.Fatal("M again should switch to Services")
+	}
 	app.feed('\t')
 	if app.mode != modeDialer {
 		t.Fatal("TAB should cycle back to dialer")

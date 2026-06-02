@@ -64,6 +64,11 @@ func run(args []string) error {
 		return web.ServeGame(addr, dir)
 	}
 
+	// Resume a previous scan from its session log.
+	if id, ok := restoreFlag(args); ok {
+		return runRestore(id)
+	}
+
 	// No arguments: sweep every local network this machine is on, hitting the
 	// most common ports first.
 	if len(args) == 0 {
@@ -306,23 +311,65 @@ func findGameDir() (string, error) {
 }
 
 // runLocalScan discovers the networks this machine is attached to and scans
-// them with a real TCP connect() sweep, common ports first.
+// them (zmap if we can open raw sockets, otherwise a TCP connect sweep), common
+// ports first, with nerva discovering UDP services and fingerprinting as it
+// goes.
 func runLocalScan() error {
 	masks, err := localNetworks()
 	if err != nil || len(masks) == 0 {
 		return fmt.Errorf("could not detect any local networks; give a target, e.g. `toneloc 192.168.1.X` (try --help)")
 	}
-	fmt.Fprintf(os.Stderr, "No target given -- sweeping %d local network(s) on common ports (%s)...\n",
-		len(masks), portsLabel(engine.CommonPorts))
+	backend := defaultScanBackend()
+	fmt.Fprintf(os.Stderr, "No target given -- sweeping %d local network(s) with %s + nerva, common ports first (%s)...\n",
+		len(masks), backend, portsLabel(engine.CommonPorts))
 	job := engine.Job{
 		DataFile:  "LOCALNET.DAT",
 		Masks:     masks,
 		Ports:     engine.CommonPorts,
-		Backend:   "connect", // real, privilege-free discovery of your own LAN
+		Backend:   backend,
 		WaitDelay: time.Second,
 		MaxRings:  4,
 	}
 	return runTerminal(job)
+}
+
+// defaultScanBackend picks zmap when we likely have raw-socket access (root),
+// otherwise the privilege-free connect scan.
+func defaultScanBackend() string {
+	if os.Geteuid() == 0 {
+		return "zmap"
+	}
+	return "connect"
+}
+
+// restoreFlag extracts the session id from --restore <id> / --restore=<id>.
+func restoreFlag(args []string) (string, bool) {
+	for i, a := range args {
+		if a == "--restore" && i+1 < len(args) {
+			return args[i+1], true
+		}
+		if strings.HasPrefix(a, "--restore=") {
+			return strings.TrimPrefix(a, "--restore="), true
+		}
+	}
+	return "", false
+}
+
+// runRestore resumes a scan from its session log.
+func runRestore(id string) error {
+	sess, err := engine.LoadSession(id)
+	if err != nil {
+		return fmt.Errorf("restore %s: %w", id, err)
+	}
+	job, err := engine.JobFromSession(sess)
+	if err != nil {
+		return err
+	}
+	job.WaitDelay = time.Second
+	job.MaxRings = 4
+	fmt.Fprintf(os.Stderr, "Restoring session %s -- %d network(s), %d service(s) recovered...\n",
+		id, len(job.Masks), len(sess.Services))
+	return runTerminalWith(job, sess)
 }
 
 // localNetworks returns the IPv4 networks attached to this host's interfaces,
@@ -376,7 +423,10 @@ func portsLabel(ps []uint16) string {
 	return strings.Join(parts, ",")
 }
 
-func runTerminal(job engine.Job) error {
+func runTerminal(job engine.Job) error { return runTerminalWith(job, nil) }
+
+// runTerminalWith launches the TUI, optionally preloading a restored session.
+func runTerminalWith(job engine.Job, sess *engine.Session) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
@@ -392,6 +442,9 @@ func runTerminal(job engine.Job) error {
 	eng, err := engine.New(ctx, job)
 	if err != nil {
 		return err
+	}
+	if sess != nil {
+		eng.Preload(sess)
 	}
 	go eng.Run(ctx)
 
@@ -477,7 +530,16 @@ FLAGS:
   --web [addr]                 serve the UI in a browser (ghostty.js), default :8080
   --game [addr]                serve the standalone JS game, default :8090
                                (or just open game/index.html in a browser)
+  --restore <id>               resume a previous scan from its session log
   -V, --help
+
+RECON PIPELINE:
+  Open TCP ports come from connect/zmap; nerva finds open UDP ports and
+  fingerprints the application/banner on every service. Select a service and
+  press ENTER for full details; press B to launch brutus against it (if the
+  protocol is supported) -- it tests common credentials in the background and
+  marks the service compromised if it gets in. Everything is written to a
+  resumable session log (--restore <id>).
 
 KEYS WHILE DIALING:
   ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait

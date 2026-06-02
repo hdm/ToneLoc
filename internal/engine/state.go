@@ -56,12 +56,18 @@ type State struct {
 	ModemName string
 	MaskText  string
 	DataFile  string
+	SessionID string
 
 	// tone is the per-address verdict grid backing the ToneMap view: one byte
 	// (a Response) per mask index, holding the highest-priority result seen
 	// across all ports for that address.
 	tone     []uint8
 	toneSpan int
+
+	// services is the recon registry: every TCP/UDP service discovered, with
+	// its nerva fingerprint and brutus credential-testing state.
+	services []*Service
+	svcIndex map[string]*Service
 }
 
 func newState() *State {
@@ -70,7 +76,57 @@ func newState() *State {
 		Modem:     newRing(200),
 		StartTime: time.Now(),
 		Speaker:   true,
+		svcIndex:  map[string]*Service{},
 	}
+}
+
+// upsertService inserts or returns the service at proto/ip:port, holding the
+// lock. The returned pointer is owned by the State; mutate it only via
+// updateService so the renderer never sees a torn write.
+func (s *State) upsertService(svc *Service) (*Service, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.svcIndex == nil {
+		s.svcIndex = map[string]*Service{}
+	}
+	if ex, ok := s.svcIndex[svc.Key()]; ok {
+		return ex, false
+	}
+	svc.IP = svc.Addr.String()
+	if svc.First.IsZero() {
+		svc.First = time.Now()
+	}
+	s.svcIndex[svc.Key()] = svc
+	s.services = append(s.services, svc)
+	return svc, true
+}
+
+// updateService runs fn against the live service under lock.
+func (s *State) updateService(key string, fn func(*Service)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if svc, ok := s.svcIndex[key]; ok {
+		fn(svc)
+	}
+}
+
+// ServicesSnapshot returns copies of all discovered services for rendering.
+func (s *State) ServicesSnapshot() []Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Service, len(s.services))
+	for i, svc := range s.services {
+		out[i] = *svc
+		out[i].Creds = append([]Cred(nil), svc.Creds...)
+	}
+	return out
+}
+
+// ServiceCount returns how many services have been discovered.
+func (s *State) ServiceCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.services)
 }
 
 // Snapshot copies the volatile parts of the state for a consistent render.
@@ -99,6 +155,7 @@ func (s *State) Snapshot() StateView {
 		ModemName: s.ModemName,
 		MaskText:  s.MaskText,
 		DataFile:  s.DataFile,
+		SessionID: s.SessionID,
 		Now:       time.Now(),
 	}
 }
@@ -124,6 +181,7 @@ type StateView struct {
 	ModemName string
 	MaskText  string
 	DataFile  string
+	SessionID string
 	Now       time.Time
 }
 

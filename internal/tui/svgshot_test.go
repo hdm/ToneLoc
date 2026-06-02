@@ -54,6 +54,40 @@ func TestGenerateScreenshot(t *testing.T) {
 	hof.setMode(modeHallOfFame)
 	hof.frame = 4
 	write(t, dir+"/toneloc-halloffame.svg", hof.FrameSVG())
+
+	// Services view: kick off a few brutes so statuses/compromise show, then
+	// render the list and a detail card.
+	count := 0
+	for _, sv := range eng.State().ServicesSnapshot() {
+		if sv.Brutable {
+			eng.StartBrute(sv.Key())
+			if count++; count >= 12 {
+				break
+			}
+		}
+	}
+	time.Sleep(2500 * time.Millisecond) // let some brutes finish/compromise
+
+	svcView := New(eng, nil)
+	svcView.setMode(modeServices)
+	svcView.frame = 4
+	write(t, dir+"/toneloc-services.svg", svcView.FrameSVG())
+
+	// Detail card for the first compromised (or brutable) service.
+	detail := New(eng, nil)
+	detail.setMode(modeServices)
+	svcs := eng.State().ServicesSnapshot()
+	for i, sv := range svcs {
+		if sv.Compromised {
+			detail.svcSel = i
+			break
+		} else if sv.Brutable && detail.svcSel == 0 {
+			detail.svcSel = i
+		}
+	}
+	detail.svcDetail = true
+	detail.frame = 4
+	write(t, dir+"/toneloc-service-detail.svg", detail.FrameSVG())
 }
 
 func write(t *testing.T, path, data string) {

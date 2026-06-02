@@ -61,6 +61,11 @@ type App struct {
 	// Hall of Fame scroll offset.
 	hofScroll int
 
+	// Services view selection/scroll/detail.
+	svcSel    int
+	svcScroll int
+	svcDetail bool
+
 	// Input escape-sequence parser state (arrows + SGR mouse share ESC[).
 	escState int // 0 normal, 1 saw ESC, 2 collecting CSI
 	csiBuf   []byte
@@ -81,6 +86,8 @@ const (
 	modeDialer viewMode = iota
 	modeToneMap
 	modeHallOfFame
+	modeServices
+	modeCount
 )
 
 // New builds an App that draws to out.
@@ -112,23 +119,22 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-a.eng.Done():
-			// Final repaint then leave the screen up briefly.
-			a.draw(a.eng.State().Snapshot())
-			a.scr.Flush(a.out)
-			return nil
 		case b, ok := <-keys:
+			// The UI stays up after the scan finishes so you can browse services
+			// and run brutus; only an explicit quit (ESC/Q) exits.
 			if !ok {
 				return nil
 			}
 			if a.feed(b) {
 				a.eng.Quit()
+				return nil
 			}
 		case <-ticker.C:
 			// A lone ESC (not the start of an arrow/mouse sequence) means quit.
 			if a.escState == 1 && time.Since(a.escTime) > 80*time.Millisecond {
 				a.escState = 0
 				a.eng.Quit()
+				return nil
 			}
 			a.frame++
 			a.draw(a.eng.State().Snapshot())
@@ -215,14 +221,23 @@ func (a *App) handleNormal(b byte) bool {
 	switch b {
 	case 'q', 'Q': // explicit quit
 		return true
-	case 'm', 'M', '\t': // cycle Dialer -> ToneMap -> Hall of Fame
-		a.setMode((a.mode + 1) % 3)
+	case 'm', 'M', '\t': // cycle Dialer -> ToneMap -> Hall of Fame -> Services
+		a.setMode((a.mode + 1) % modeCount)
 		return false
-	case 'f', 'F': // jump straight to the Hall of Fame
-		if a.mode != modeDialer { // 'F' is also a Dialer note key
-			a.setMode(modeHallOfFame)
-			return false
+	}
+
+	if a.mode == modeServices {
+		switch b {
+		case 'k':
+			a.moveCursor(0, -1)
+		case 'j':
+			a.moveCursor(0, 1)
+		case '\r', '\n': // enter -> toggle full detail
+			a.svcDetail = !a.svcDetail
+		case 'b', 'B': // launch brutus against the selected service
+			a.bruteSelected()
 		}
+		return false
 	}
 
 	if a.mode == modeToneMap {
@@ -286,6 +301,24 @@ func (a *App) setMode(m viewMode) {
 	a.enableMouse(m == modeToneMap)
 }
 
+// bruteSelected launches brutus against the highlighted service.
+func (a *App) bruteSelected() {
+	svcs := a.eng.State().ServicesSnapshot()
+	if len(svcs) == 0 {
+		return
+	}
+	i := a.svcSel
+	if i < 0 {
+		i = 0
+	}
+	if i >= len(svcs) {
+		i = len(svcs) - 1
+	}
+	if svcs[i].Brutable {
+		a.eng.StartBrute(svcs[i].Key())
+	}
+}
+
 // enableMouse toggles xterm any-event mouse reporting in SGR mode, so hovering
 // the ToneMap streams motion events we can read off the same input channel.
 func (a *App) enableMouse(on bool) {
@@ -301,6 +334,13 @@ func (a *App) enableMouse(on bool) {
 }
 
 func (a *App) moveCursor(dx, dy int) {
+	if a.mode == modeServices {
+		a.svcSel += dy
+		if a.svcSel < 0 {
+			a.svcSel = 0
+		}
+		return
+	}
 	if a.mode == modeHallOfFame {
 		a.hofScroll += dy // clamped at draw time against the list length
 		if a.hofScroll < 0 {
@@ -389,6 +429,10 @@ func (a *App) draw(v engine.StateView) {
 	}
 	if a.mode == modeHallOfFame {
 		a.drawHallOfFame(v)
+		return
+	}
+	if a.mode == modeServices {
+		a.drawServices(v)
 		return
 	}
 	s := a.scr

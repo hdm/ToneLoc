@@ -91,10 +91,48 @@ toneloc 203.0.113.X --web :9000         # serve the UI in a browser
   full DOS experience run for anyone, anywhere.
 * **`connect`** — a real TCP `connect()` scan via the Go runtime. Needs no
   special privileges. Reads banners (→ tones).
-* **`zmap`** — drives the **real zmap scanner** built from the sibling
-  `zmap-go` module (`tcp_synscan`). This is a raw-packet stateless mass scan,
-  so it needs `root`/`cap_net_raw` and a live network; if that's unavailable
-  ToneLoc transparently falls back to the simulator.
+* **`zmap`** — drives the **real zmap scanner** from the `zmap-go` module
+  (`tcp_synscan`). This is a raw-packet stateless mass scan, so it needs
+  `root`/`cap_net_raw` and a live network; if that's unavailable ToneLoc
+  transparently falls back to the simulator.
+
+### The recon pipeline (nerva + brutus)
+
+Open TCP ports are only the start. ToneLoc runs a four-tool pipeline:
+
+| Tool | Role |
+|------|------|
+| **connect / zmap** | find open **TCP** ports |
+| **[nerva](https://github.com/praetorian-inc/nerva)** | find open **UDP** ports, and **fingerprint** the application/banner on every service |
+| **[brutus](https://github.com/praetorian-inc/brutus)** | test **common credentials** against any service whose protocol it supports |
+
+nerva and brutus are auto-detected on your `PATH` (`go install
+github.com/praetorian-inc/nerva/cmd/nerva@latest` and
+`.../brutus/cmd/brutus@latest`); when they're absent — or in `sim` mode and the
+game — ToneLoc uses built-in simulators, so the whole flow works with no tools
+and no network.
+
+Every discovered service is summarized in the **Services** view (cycle with
+**M**). Select one and press **ENTER** for full detail; press **B** to launch
+**brutus** against it in the background — its progress shows live (`[bruting N]`)
+and a valid credential marks the service **`** PWNED **`**.
+
+### Sessions (`--restore`)
+
+Every scan writes a resumable **session log** (`toneloc-<id>.session`) capturing
+the dialed targets, discovered services, nerva fingerprints, and brutus
+results. The id is shown at startup; resume anytime with:
+
+```sh
+toneloc --restore <id>
+```
+
+### Default behaviour
+
+Run **`toneloc`** with no arguments and it immediately enters full-screen
+terminal mode and sweeps **every local network** this machine is on — `zmap` if
+it can open raw sockets, otherwise `connect` — with **nerva** discovering UDP
+services and fingerprinting as it goes, common ports first.
 
 In every mode the **target ordering itself comes from zmap-go** — ToneLoc/Go
 walks the `(address, port)` space with zmap-go's cyclic multiplicative-group
@@ -107,7 +145,8 @@ random number twice" promise.
 ```
 ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait
 N/C/F/G/V/Y annotate the current number
-M or TAB   cycle views: Dialer -> ToneMap -> Hall of Fame   (F jumps to Hall of Fame)
+M or TAB   cycle views: Dialer -> ToneMap -> Hall of Fame -> Services
+in Services:  j/k or arrows select   ENTER detail   B run brutus
 ```
 
 ### Hall of Fame
@@ -225,8 +264,10 @@ High scores are kept in `localStorage`.
 ```
 cmd/toneloc            CLI: ToneLoc-style /M /R /X /p args, raw-tty input, --web
 internal/engine        scan engine: IP masks, zmap-go iterator, response
-                       classification, the sim/connect/zmap backends, live
-                       stats, the ToneMap grid, and .DAT persistence
+                       classification, the sim/connect/zmap backends, the
+                       nerva+brutus recon pipeline (tools.go/nerva.go/brutus.go/
+                       recon.go), services registry, sessions (session.go),
+                       live stats, the ToneMap grid, and .DAT persistence
 internal/dos           an 80x25, 16-colour MS-DOS text-mode renderer
                        (CP437 box-drawing, blink, a diffing ANSI flusher, SVG)
 internal/tui           the 3-window dialer + the ToneMap view, keyboard and

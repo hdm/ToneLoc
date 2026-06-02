@@ -36,6 +36,10 @@ type Engine struct {
 	dat      *DatFile
 	dirty    bool
 	lastSave time.Time
+
+	toolkit   Toolkit         // nerva (fingerprint/udp) + brutus (creds)
+	bgCtx     context.Context // long-lived context for tool goroutines
+	sessionID string          // resumable session log id
 }
 
 type segment struct {
@@ -151,8 +155,22 @@ func New(ctx context.Context, job Job) (*Engine, error) {
 	st.ModemName = e.probe.Name()
 	e.logf("Modem: %s", e.probe.Name())
 	e.logf("Initializing modem ... Done")
+
+	// Recon tools: nerva (UDP discovery + fingerprinting) and brutus (creds).
+	e.toolkit = NewToolkit(job.Backend, job.Seed)
+	e.bgCtx = context.Background()
+	e.logf("Recon tools: %s", e.toolkit.Names)
+	e.sessionID = job.SessionID
+	if e.sessionID == "" {
+		e.sessionID = newSessionID()
+	}
+	st.SessionID = e.sessionID
+	e.logf("Session: %s  (resume with --restore %s)", e.sessionID, e.sessionID)
 	return e, nil
 }
+
+// SessionID returns this scan's resumable session id.
+func (e *Engine) SessionID() string { return e.sessionID }
 
 // seedFromDat pre-populates the live stats and Found list from a loaded data
 // file, so a resumed scan shows its history rather than starting from zero.
@@ -281,6 +299,9 @@ func (e *Engine) Run(ctx context.Context) {
 	defer close(e.done)
 	defer e.probe.Close()
 
+	e.bgCtx = ctx
+	go e.discoverUDP(ctx) // nerva UDP sweep, concurrent with the TCP dialer
+
 	waitDelay := e.job.WaitDelay
 	var pending *target // a target to (re)dial before pulling the next
 
@@ -363,22 +384,23 @@ func (e *Engine) Run(ctx context.Context) {
 // autosave writes the data file at most every 15s while a scan runs (and always
 // when force is set, e.g. on exit), so progress survives a crash or Ctrl-C.
 func (e *Engine) autosave(force bool) {
-	if e.dat == nil || !e.dirty {
-		return
-	}
 	if !force && time.Since(e.lastSave) < 15*time.Second {
 		return
 	}
-	e.state.mu.Lock() // serialize with web export/import
-	err := e.dat.Save()
-	e.state.mu.Unlock()
-	if err != nil {
-		e.logf("Autosave failed: %v", err)
-		return
+	wasDirty := e.dirty
+	if e.dat != nil && e.dirty {
+		e.state.mu.Lock() // serialize with web export/import + session writes
+		err := e.dat.Save()
+		e.state.mu.Unlock()
+		if err != nil {
+			e.logf("Autosave failed: %v", err)
+		} else {
+			e.dirty = false
+		}
 	}
-	e.dirty = false
 	e.lastSave = time.Now()
-	if !force {
+	e.saveSession() // also captures services found by background recon
+	if !force && wasDirty {
 		e.log("Autosaving")
 	}
 }
@@ -660,6 +682,7 @@ func (e *Engine) record(res Result) {
 		if res.Banner != "" {
 			e.modem(res.Banner)
 		}
+		e.onOpenTCP(res) // register the service + kick off nerva fingerprinting
 	case RespBusy, RespVoice:
 		e.logTarget(res, res.Response.Tag())
 	case RespNoDialtone:

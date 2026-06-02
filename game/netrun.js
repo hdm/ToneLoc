@@ -129,7 +129,7 @@
 
   // ---- tools ---------------------------------------------------------------
   const TOOLS = {
-    dict:  {name:"Dict Attack",   vs:["telnet","ssh","ftp","pop3","telnets"], dmg:1, alert:1, heat:3, odds:.65},
+    dict:  {name:"brutus (dict)",  vs:["telnet","ssh","ftp","pop3","telnets"], dmg:1, alert:1, heat:3, odds:.65},
     web:   {name:"Web Exploit",   vs:["http","https","http-alt"],             dmg:2, alert:1, heat:4, odds:.7},
     creds: {name:"Default Creds", vs:["telnet","ssh","ftp","http-alt","https"],dmg:2, alert:2, heat:2, odds:.55},
     bof:   {name:"Buffer Ovflw",  vs:["*"],                                    dmg:3, alert:2, heat:6, odds:.5,  limited:true},
@@ -222,9 +222,9 @@
     n.alert = 0;
     G.inf = { n, tool:firstTool(n), vec:0, mode:"tools", pwSel:0, log:[
       "Connected to "+n.ip+" ("+n.host+")",
-      n.ports.length? ("services: "+n.ports.map(p=>p.svc+"/"+p.port).join("  ")) : "no open services" ] };
+      "nerva: "+(n.ports.map(p=>p.svc+"/"+p.port).join("  ")||"no services") ] };
     G.screen=SCR.INF;
-    log("$ exploit "+n.ip+" ...");
+    log("$ nerva "+n.ip+"  ::  brutus armed ...");
   }
   function firstTool(n){ const ids=toolIds(); for(const id of ids){ if(applies(TOOLS[id], curVecSvc(n,0))) return ids.indexOf(id); } return 0; }
   function toolIds(){ return Object.keys(TOOLS).filter(id=>!TOOLS[id].limited || G.inv[id]>0); }
@@ -317,7 +317,7 @@
     const pal=[C.LGREEN,C.LCYAN,C.CYAN,C.LBLUE,C.GREEN];
     for(let r=0;r<5;r++) scr.print(lx,2+r,pal[(((G.frame/3)|0)+r)%pal.length],C.BLACK,logo[r]);
     center(scr,8,C.YELLOW,C.BLACK,"a ToneLoc/Go infiltration roguelike");
-    center(scr,10,C.WHITE,C.BLACK,"SCAN from your nodes  ::  BREACH with tools & passwords");
+    center(scr,10,C.WHITE,C.BLACK,"SCAN with nerva  ::  BREACH with brutus tools & password sprays");
     center(scr,11,C.WHITE,C.BLACK,"PIVOT deeper for LOOT  ::  grab the MAINFRAME and go DARK");
     center(scr,13,C.LRED,C.BLACK,"but a TRACE crawls home while you're connected --");
     center(scr,14,C.LRED,C.BLACK,"let it reach HOME and you're BUSTED. disconnect to cool it.");
@@ -411,7 +411,7 @@
       const lim=t.limited?(" x"+G.inv[id]):"";
       scr.print(2,11+i,c,bg,pad((selt?"►":" ")+t.name+lim,24));
       scr.print(27,11+i,selt?C.BLACK:C.YELLOW,bg,ok?(Math.round(t.odds*100)+"%"):"n/a"); });
-    if(n.hasLogin) scr.print(2,18,C.LMAG,C.BLACK,"[G] guess password");
+    if(n.hasLogin) scr.print(2,18,C.LMAG,C.BLACK,"[G] brutus password spray");
     // Log.
     scr.box(40,9,40,10,C.LCYAN,C.BLACK,true); scr.title(40,9,40,C.WHITE,C.BLACK,"Session");
     inf.log.slice(-8).forEach((l,i)=>{ let c=C.LGRAY; if(l.indexOf("BREACH")>=0||l.indexOf("GRANTED")>=0)c=C.LGREEN;

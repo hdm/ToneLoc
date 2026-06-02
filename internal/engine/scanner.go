@@ -20,6 +20,7 @@ type Job struct {
 	Seed      uint64        // 0 = random permutation, else reproducible
 	Limit     uint64        // max dials this run (0 = whole space)
 	Backend   string        // "sim", "connect" or "zmap"
+	SessionID string        // resume an existing session log (else a new id)
 }
 
 // maskList returns the masks to scan, preferring Masks but falling back to the
