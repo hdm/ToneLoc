@@ -33,11 +33,12 @@ func TestWebSocketSession(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// We should receive ANSI render output within a moment.
-	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	// We should receive ANSI render output; the intro splash plays first, so
+	// read until the dialer's Activity Log window appears.
+	conn.SetReadDeadline(time.Now().Add(6 * time.Second))
 	var got strings.Builder
 	buf := make([]byte, 8192)
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 400; i++ {
 		n, err := conn.Read(buf)
 		if err != nil {
 			break

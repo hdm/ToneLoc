@@ -31,6 +31,12 @@ func TestGenerateScreenshot(t *testing.T) {
 	go eng.Run(ctx)
 	time.Sleep(3 * time.Second) // let plenty of results accumulate
 
+	// Intro splash.
+	splash := New(eng, nil)
+	splash.splashUntil = time.Now().Add(time.Hour)
+	splash.frame = 9
+	write(t, dir+"/toneloc-splash.svg", splash.FrameSVG())
+
 	// Dialer view.
 	dialer := New(eng, nil)
 	dialer.frame = 4

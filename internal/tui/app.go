@@ -62,6 +62,10 @@ type App struct {
 	escState int // 0 normal, 1 saw ESC, 2 collecting CSI
 	csiBuf   []byte
 	escTime  time.Time
+
+	// Boot splash (intro screen) timing.
+	splashUntil time.Time
+	splashDone  bool
 }
 
 type viewMode int
@@ -89,6 +93,9 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 		a.enableMouse(false)
 		io.WriteString(a.out, "\x1b[0m\x1b[?25h\x1b[?1049l")
 	}()
+
+	// Show the intro splash for a couple of seconds (any key skips it).
+	a.splashUntil = time.Now().Add(2800 * time.Millisecond)
 
 	a.draw(a.eng.State().Snapshot())
 	a.scr.Flush(a.out)
@@ -125,6 +132,12 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 // feed pushes one input byte through the escape-sequence parser and returns
 // true if the program should quit.
 func (a *App) feed(b byte) bool {
+	// Any key dismisses the intro splash without otherwise acting.
+	if a.inSplash() {
+		a.splashDone = true
+		a.escState = 0
+		return false
+	}
 	switch a.escState {
 	case 2: // collecting a CSI / SS3 sequence
 		a.csiBuf = append(a.csiBuf, b)
@@ -313,6 +326,10 @@ func (a *App) FrameSVG() string {
 
 func (a *App) draw(v engine.StateView) {
 	a.blink = (a.frame/10)%2 == 0
+	if a.inSplash() {
+		a.drawSplash()
+		return
+	}
 	if a.mode == modeToneMap {
 		a.drawToneMap(v)
 		return
