@@ -150,6 +150,48 @@ fake BIOS/POST boot sequence before the carrier connects. It also synthesizes
 handshake screech on a carrier (toggle with **S**). (If `ghostty-web` can't be
 reached, the page falls back to `xterm.js` automatically.)
 
+## ToneLoc: THE GAME (standalone, no server)
+
+There's also a complete **server-free JavaScript game** in [`game/`](game/) — the
+whole ToneLoc frontend (DOS renderer, dialer, ToneMap, Hall of Fame, CRT/glitch
+shell, modem sounds) reimplemented in the browser, played as an arcade hacker
+game:
+
+> **War-dial the net before the Feds trace you.** Find carriers and tones to
+> score and clear each level's quota while a **TRACE** meter climbs. Honeypots
+> spike it. Hit 100% and you're **BUSTED**. Burn an **evade** (C) to clear your
+> logs; **boost** (B) to dial faster at the cost of more heat.
+
+The game world is **seeded by real-zmap-format data**: `game/seed.js` is
+produced by the `toneloc-seed` tool, which walks the address space with
+zmap-go's cyclic iterator (the same permutation the real scanner uses) — or
+ingests an actual `zmap` scan:
+
+```sh
+go build -o toneloc-seed ./cmd/toneloc-seed
+
+# synthesize a world from zmap-go's iterator (reproducible):
+./toneloc-seed -mask 10.37.0.0/16 > game/seed.js
+
+# ...or seed it from a REAL zmap scan:
+zmap -p 22,23,80,443 -O csv -f saddr,sport,classification,success 198.51.100.0/24 \
+    | ./toneloc-seed -csv -mask 198.51.100.0/24 > game/seed.js
+```
+
+Play it with **zero dependencies** — just open the file:
+
+```sh
+# double-click game/index.html, or:
+xdg-open game/index.html            # / open on macOS
+# or serve it (also works) :
+./toneloc --game :8090              # → http://localhost:8090/
+python3 -m http.server -d game 8090 # any static server works too
+```
+
+Controls: **ENTER** start · **M** cycle views · **F** hall of fame · **C**
+clear logs (evade) · **B** boost · **P** pause · **S** sound · **ESC** title.
+High score is kept in `localStorage`.
+
 ## How it fits together
 
 ```
@@ -161,7 +203,9 @@ internal/dos           an 80x25, 16-colour MS-DOS text-mode renderer
                        (CP437 box-drawing, blink, a diffing ANSI flusher, SVG)
 internal/tui           the 3-window dialer + the ToneMap view, keyboard and
                        mouse handling (arrow/SGR-mouse escape parsing)
-internal/web           HTTP + WebSocket bridge to ghostty.js
+internal/web           HTTP + WebSocket bridge to ghostty.js; static game server
+cmd/toneloc-seed       builds game/seed.js from zmap-go's iterator or a zmap CSV
+game/                  the standalone, server-free JavaScript arcade game
 ```
 
 ## Legal / ethical note

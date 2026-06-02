@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -34,9 +35,11 @@ func main() {
 }
 
 type options struct {
-	job     engine.Job
-	webAddr string
-	useWeb  bool
+	job      engine.Job
+	webAddr  string
+	useWeb   bool
+	gameAddr string
+	useGame  bool
 }
 
 func run(args []string) error {
@@ -47,6 +50,16 @@ func run(args []string) error {
 	if args[0] == "-V" || args[0] == "--version" {
 		fmt.Printf("ToneLoc/Go %s -- IPv4 war-dialer powered by zmap-go\n", version)
 		return nil
+	}
+
+	// The standalone JS game needs no mask, so handle --game before the rest of
+	// the command line is parsed.
+	if addr, ok := gameFlag(args); ok {
+		dir, err := findGameDir()
+		if err != nil {
+			return err
+		}
+		return web.ServeGame(addr, dir)
 	}
 
 	opt, err := parseArgs(args)
@@ -244,6 +257,46 @@ func parseArgs(args []string) (options, error) {
 	return opt, nil
 }
 
+// gameFlag scans for "--game" / "--game=addr" / "--game addr" and returns the
+// listen address to serve the standalone game on (default :8090).
+func gameFlag(args []string) (string, bool) {
+	for i, a := range args {
+		if a == "--game" {
+			if i+1 < len(args) && looksLikeAddr(args[i+1]) {
+				return args[i+1], true
+			}
+			return ":8090", true
+		}
+		if strings.HasPrefix(a, "--game=") {
+			return strings.TrimPrefix(a, "--game="), true
+		}
+	}
+	return "", false
+}
+
+// findGameDir locates the game/ directory next to the working dir or binary.
+func findGameDir() (string, error) {
+	roots := []string{"."}
+	if exe, err := os.Executable(); err == nil {
+		roots = append(roots, filepath.Dir(exe))
+	}
+	for _, root := range roots {
+		dir := root
+		for i := 0; i < 6; i++ {
+			cand := filepath.Join(dir, "game")
+			if st, err := os.Stat(filepath.Join(cand, "index.html")); err == nil && !st.IsDir() {
+				return cand, nil
+			}
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return "", fmt.Errorf("game/ directory not found (run from the ToneLoc repo, or open game/index.html directly)")
+}
+
 func runTerminal(job engine.Job) error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
@@ -340,6 +393,8 @@ FLAGS:
   --seed N                     reproducible scan order (0 = random)
   --limit N                    stop after N dials
   --web [addr]                 serve the UI in a browser (ghostty.js), default :8080
+  --game [addr]                serve the standalone JS game, default :8090
+                               (or just open game/index.html in a browser)
   -V, --help
 
 KEYS WHILE DIALING:

@@ -46,6 +46,16 @@ func Serve(addr string, job engine.Job) error {
 	return http.ListenAndServe(addr, mux)
 }
 
+// ServeGame serves the standalone, server-free JavaScript game (the game/
+// directory: index.html, toneloc.js, seed.js) as static files. The game needs
+// no backend -- this is purely a convenience so you don't have to open the file
+// by hand. The same files also run straight from file:// in any browser.
+func ServeGame(addr, dir string) error {
+	fmt.Printf("ToneLoc/Go THE GAME -- open http://%s/ in your browser\n", friendly(addr))
+	fmt.Printf("(static files from %s; no backend, the simulation runs in your browser)\n", dir)
+	return http.ListenAndServe(addr, http.FileServer(http.Dir(dir)))
+}
+
 func serveSession(conn *websocket.Conn, job engine.Job) {
 	defer conn.Close()
 	ctx, cancel := context.WithCancel(context.Background())
