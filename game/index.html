@@ -11,13 +11,14 @@
   #matrix{position:fixed;inset:0;z-index:0;opacity:.28;}
   #frame{position:absolute;inset:0;z-index:1;display:flex;align-items:center;justify-content:center;
     background:radial-gradient(ellipse at center, rgba(10,10,10,.6) 0%, rgba(0,0,0,.93) 80%);}
-  #bezel{position:relative;padding:24px 28px 40px;border-radius:24px;
+  #bezel{position:relative;display:inline-block;padding:20px 24px 34px;border-radius:24px;
+    transform-origin:center center;will-change:transform;
     background:linear-gradient(155deg,#343434,#0c0c0c);
     box-shadow: inset 0 0 4px #000, inset 0 2px 14px rgba(255,255,255,.05), 0 22px 70px rgba(0,0,0,.85), 0 0 0 2px #000;}
   #bezel::after{content:"";position:absolute;right:34px;bottom:15px;width:8px;height:8px;border-radius:50%;
     background:var(--green);box-shadow:0 0 8px var(--green);animation:led 3.2s infinite;}
   @keyframes led{0%,92%,100%{opacity:1}95%{opacity:.3}}
-  #screen{position:relative;border-radius:14px/12px;overflow:hidden;background:#000;
+  #screen{position:relative;display:inline-block;border-radius:14px/12px;overflow:hidden;background:#000;
     box-shadow: inset 0 0 70px rgba(0,0,0,.95), inset 0 0 16px rgba(60,255,120,.06);}
   #cv{display:block;image-rendering:pixelated;filter:
       drop-shadow(.6px 0 0 rgba(255,40,40,.32)) drop-shadow(-.6px 0 0 rgba(40,200,255,.32));}
@@ -26,12 +27,11 @@
   #grille{position:absolute;inset:0;z-index:5;pointer-events:none;mix-blend-mode:screen;opacity:.05;
     background:repeating-linear-gradient(to right,#f00 0,#0f0 1px,#00f 2px,#000 3px);}
   #sweep{position:absolute;left:0;right:0;height:22%;z-index:6;pointer-events:none;
-    background:linear-gradient(to bottom, rgba(120,255,170,0), rgba(120,255,170,.06), rgba(120,255,170,0));animation:roll 7.5s linear infinite;}
+    background:linear-gradient(to bottom, rgba(120,255,170,0), rgba(120,255,170,.05), rgba(120,255,170,0));animation:roll 11s linear infinite;}
   @keyframes roll{0%{top:-25%}100%{top:105%}}
-  #noise{position:absolute;inset:0;z-index:6;pointer-events:none;opacity:.04;mix-blend-mode:overlay;
-    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
-    animation:fuzz .5s steps(3) infinite;}
-  @keyframes fuzz{0%{background-position:0 0}33%{background-position:-40px 30px}66%{background-position:30px -20px}100%{background-position:0 0}}
+  /* Static TV-noise overlay (no animation -> no flicker). */
+  #noise{position:absolute;inset:0;z-index:6;pointer-events:none;opacity:.035;mix-blend-mode:overlay;
+    background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='120' height='120'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");}
   #vignette{position:absolute;inset:0;z-index:7;pointer-events:none;border-radius:14px/12px;box-shadow: inset 0 0 130px rgba(0,0,0,.6);}
   #screen.glitch #cv{animation:glitch .28s steps(2) 1;}
   @keyframes glitch{
@@ -41,13 +41,17 @@
     60%{transform:translate(-3px,0);filter:drop-shadow(9px 0 0 rgba(255,0,80,.6)) drop-shadow(-9px 0 0 rgba(0,255,210,.6));clip-path:inset(30% 0 40% 0);}
     100%{transform:translate(0,0);}
   }
-  #screen.glitch #noise{opacity:.2;}
+  #screen.glitch #noise{opacity:.15;}
   #label{margin-top:14px;text-align:center;color:#6a6a6a;font-size:12px;letter-spacing:2px;}
   #label b{color:var(--amber);}
+  #fsbtn{position:fixed;top:10px;left:12px;z-index:20;background:rgba(20,20,20,.6);color:#6a6a6a;
+    border:1px solid #333;border-radius:6px;font:14px monospace;padding:4px 9px;cursor:pointer;}
+  #fsbtn:hover{color:var(--green);border-color:var(--green);}
 </style>
 </head>
 <body>
 <canvas id="matrix"></canvas>
+<button id="fsbtn" title="toggle fullscreen">⛶ fullscreen</button>
 <div id="frame">
   <div id="bezel">
     <div id="screen">
@@ -75,9 +79,22 @@
       if(y>cv.height&&Math.random()>0.975)drops[i]=0;drops[i]++;}
     setTimeout(()=>requestAnimationFrame(t),55);})();
 })();
-// Periodic glitch bursts.
+// Occasional glitch tear (rare; not a flicker).
 (function(){const s=document.getElementById('screen');(function l(){setTimeout(()=>{s.classList.add('glitch');
-  setTimeout(()=>s.classList.remove('glitch'),300);l();},3500+Math.random()*6000);})();})();
+  setTimeout(()=>s.classList.remove('glitch'),300);l();},9000+Math.random()*12000);})();})();
+// Scale the monitor to fill the viewport, and a fullscreen toggle.
+(function(){
+  const bezel=document.getElementById('bezel');
+  function fit(){ const w=bezel.offsetWidth,h=bezel.offsetHeight; if(!w||!h)return;
+    bezel.style.transform='scale('+Math.max(0.1,Math.min(innerWidth/w,innerHeight/h))+')'; }
+  addEventListener('resize',fit);
+  document.addEventListener('fullscreenchange',()=>setTimeout(fit,60));
+  new ResizeObserver(fit).observe(document.getElementById('screen'));
+  requestAnimationFrame(fit); setTimeout(fit,120); setTimeout(fit,400);
+  document.getElementById('fsbtn').addEventListener('click',(e)=>{ e.preventDefault();
+    if(document.fullscreenElement) document.exitFullscreen();
+    else (document.documentElement.requestFullscreen?.()||Promise.resolve()).catch(()=>{}); });
+})();
 </script>
 <script src="seed.js"></script>
 <script src="netrun.js"></script>
