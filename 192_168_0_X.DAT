@@ -1,0 +1,8 @@
+# ToneLoc/Go data file v1
+mask 192.168.0.X
+ports 22
+updated 2026-06-03T00:29:43Z
+r 192.168.0.189:22 voice 4 1
+r 192.168.0.206:22 timeout 3 1
+r 192.168.0.34:22 busy 0 1
+r 192.168.0.78:22 ringout 6 1

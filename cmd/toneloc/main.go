@@ -518,12 +518,24 @@ func runTerminalWith(job engine.Job, sess *engine.Session) error {
 	}()
 
 	app := tui.New(eng, os.Stdout)
-	// Fill the real terminal instead of a fixed 80x25, and follow resizes.
-	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+	// Fill the real terminal instead of a fixed 80x25, and follow resizes. Read
+	// the size from whichever of stdout/stdin is a terminal (stdout is what we
+	// actually draw to).
+	sizeFD := terminalFD()
+	if w, h, err := term.GetSize(sizeFD); err == nil && w > 0 && h > 0 {
 		app.SetSize(w, h)
 	}
-	go watchTerminalResize(int(os.Stdin.Fd()), app)
+	go watchTerminalResize(sizeFD, app)
 	return app.Run(ctx, keys)
+}
+
+// terminalFD returns the fd to query for the terminal size: stdout if it is a
+// terminal, else stdin.
+func terminalFD() int {
+	if term.IsTerminal(int(os.Stdout.Fd())) {
+		return int(os.Stdout.Fd())
+	}
+	return int(os.Stdin.Fd())
 }
 
 // --- small parsing helpers ---
