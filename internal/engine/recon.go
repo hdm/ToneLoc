@@ -9,10 +9,12 @@ import (
 // fingerprint it. Called from the dial loop when a carrier/tone is found.
 func (e *Engine) onOpenTCP(res Result) {
 	app := appForPort("tcp", res.Port)
-	svc := &Service{Addr: res.Addr, Port: res.Port, Proto: "tcp", App: app, Banner: res.Banner}
+	// res.Banner is what connect/zmap grabbed; nerva (below) may overwrite App
+	// and add its own banner/version.
+	svc := &Service{Addr: res.Addr, Port: res.Port, Proto: "tcp", App: app, ConnectBanner: res.Banner}
 	svc.Brutable = bruteProtocol(app) != ""
 	s, created := e.state.upsertService(svc)
-	if created {
+	if created && e.nervaOn {
 		go e.fingerprint(s.Key(), res.Addr.String(), res.Port)
 	}
 }
@@ -44,6 +46,9 @@ func (e *Engine) fingerprint(key, ip string, port uint16) {
 // discoverUDP runs nerva's UDP probes across the whole address space and
 // registers any responders as UDP services.
 func (e *Engine) discoverUDP(ctx context.Context) {
+	if !e.nervaOn {
+		return
+	}
 	addrs := e.allAddrs(1 << 16)
 	if len(addrs) == 0 {
 		return
@@ -75,6 +80,10 @@ func (e *Engine) allAddrs(max int) []netip.Addr {
 // streaming progress into the UI and marking the service compromised if a valid
 // credential turns up.
 func (e *Engine) StartBrute(key string) {
+	if !e.brutusOn {
+		e.logf("brutus is disabled (enable with --brutus)")
+		return
+	}
 	var svc Service
 	start := false
 	e.state.updateService(key, func(s *Service) {

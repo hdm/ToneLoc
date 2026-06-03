@@ -111,10 +111,19 @@ self-contained binary, no external tools to install. In `sim` mode (and the
 game) it uses built-in simulators instead, so the whole flow still works with
 no network.
 
-Every discovered service is summarized in the **Services** view (cycle with
-**M**). Select one and press **ENTER** for full detail; press **B** to launch
-**brutus** against it in the background — its progress shows live (`[bruting N]`)
-and a valid credential marks the service **`** PWNED **`**.
+**Toggles:** nerva is **on by default** (`--no-nerva` to disable); brutus is
+**off by default**, on automatically in `sim` mode (`--brutus` to enable on real
+backends, `--no-brutus` to force off). Brutus never auto-runs against real
+services — you launch it per-service.
+
+Discovered services are summarized in the **Services** view and the **Hall of
+Fame** (cycle with **M**); both are selectable with **j/k**/arrows. Press
+**ENTER** for the full detail card — which shows the **connect** banner, the
+**nerva** app/version/banner, and any **brutus** username/password — and **B**
+to launch brutus in the background. Its progress shows live (`[bruting N]`) and
+a valid credential marks the service **`** PWNED **`**.
+
+The TUI fills the **whole terminal** (not a fixed 80×25) and follows resizes.
 
 ### Sessions (`--restore`)
 
@@ -208,7 +217,9 @@ The browser loads [`ghostty-web`](https://github.com/coder/ghostty-web) — the
 xterm.js-compatible WASM build of Ghostty's VT100 emulator — from a CDN and
 opens a WebSocket back to the server. The server runs the **same** TUI render
 loop per connection and streams the identical ANSI/VT output a local terminal
-would draw; keystrokes flow back over the socket. The page goes full retro: a
+would draw; keystrokes flow back over the socket. The browser terminal fills the
+window (it reports its size so the UI uses the full rows/columns), and if the
+connection drops you can click or press a key to **redial** a fresh scan. The page goes full retro: a
 matrix hex-rain backdrop, a CRT power-on animation, VGA scanlines, chromatic
 aberration with periodic glitch tearing and TV static, a faux-CRT bezel, and a
 fake BIOS/POST boot sequence before the carrier connects. It also synthesizes

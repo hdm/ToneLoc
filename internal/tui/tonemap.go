@@ -20,27 +20,27 @@ func (a *App) drawToneMap(v engine.StateView) {
 	// Title bar with live scan progress.
 	title := fmt.Sprintf(" ToneMap  %s  (%d addresses)", v.MaskText, a.eng.Span())
 	prog := fmt.Sprintf("Dialed %d/%d ", v.Stats.Dialed, v.Stats.Max)
-	bar := dos.Pad(title, scrW-len([]rune(prog))) + prog
-	s.Print(0, 0, dos.Attr(dos.Black, dos.LightGray), dos.Pad(bar, scrW))
+	bar := dos.Pad(title, a.scr.W-len([]rune(prog))) + prog
+	s.Print(0, 0, dos.Attr(dos.Black, dos.LightGray), dos.Pad(bar, a.scr.W))
 
 	// Refresh the downsampled grid no more than ~8x/sec; the underlying space
 	// can be millions of addresses.
 	if time.Since(a.mapAt) > 120*time.Millisecond || a.mapCells == nil {
-		a.mapCells, a.mapPerCell = a.eng.State().RenderTone(tmGW, tmGH)
+		a.mapCells, a.mapPerCell = a.eng.State().RenderTone(a.lTmGW, a.lTmGH)
 		a.mapAt = time.Now()
 	}
 	span := int(a.eng.Span())
 
 	// The grid.
-	for r := 0; r < tmGH; r++ {
-		for c := 0; c < tmGW; c++ {
-			ci := r*tmGW + c
+	for r := 0; r < a.lTmGH; r++ {
+		for c := 0; c < a.lTmGW; c++ {
+			ci := r*a.lTmGW + c
 			start := ci * a.mapPerCell
 			ch, color := ' ', dos.Black
 			if start < span && ci < len(a.mapCells) {
 				ch, color = toneGlyph(engine.Response(a.mapCells[ci]))
 			}
-			s.Set(tmGX+c, tmGY+r, ch, dos.Attr(color, dos.Black))
+			s.Set(a.lTmGX+c, a.lTmGY+r, ch, dos.Attr(color, dos.Black))
 		}
 	}
 
@@ -89,14 +89,14 @@ var legendItems = []struct {
 
 func (a *App) drawLegend() {
 	s := a.scr
-	s.Box(tmLegendX-1, tmGY-1, scrW-(tmLegendX-1), len(legendItems)+4, dos.Attr(dos.LightGray, dos.Black), true)
-	s.Title(tmLegendX-1, tmGY-1, scrW-(tmLegendX-1), dos.Attr(dos.White, dos.Black), "Key")
+	s.Box(a.lTmLegendX-1, a.lTmGY-1, a.scr.W-(a.lTmLegendX-1), len(legendItems)+4, dos.Attr(dos.LightGray, dos.Black), true)
+	s.Title(a.lTmLegendX-1, a.lTmGY-1, a.scr.W-(a.lTmLegendX-1), dos.Attr(dos.White, dos.Black), "Key")
 	for i, it := range legendItems {
 		ch, color := toneGlyph(it.resp)
-		y := tmGY + i + 1
-		s.Set(tmLegendX, y, ch, dos.Attr(color, dos.Black))
-		s.Set(tmLegendX+1, y, ch, dos.Attr(color, dos.Black))
-		s.Print(tmLegendX+3, y, dos.Attr(dos.LightGray, dos.Black), it.label)
+		y := a.lTmGY + i + 1
+		s.Set(a.lTmLegendX, y, ch, dos.Attr(color, dos.Black))
+		s.Set(a.lTmLegendX+1, y, ch, dos.Attr(color, dos.Black))
+		s.Print(a.lTmLegendX+3, y, dos.Attr(dos.LightGray, dos.Black), it.label)
 	}
 }
 
@@ -104,8 +104,8 @@ func (a *App) drawLegend() {
 // tip on the cell whose data the footer is showing.
 func (a *App) drawMapCursor() {
 	s := a.scr
-	cx := tmGX + a.curCol
-	cy := tmGY + a.curRow
+	cx := a.lTmGX + a.curCol
+	cy := a.lTmGY + a.curRow
 	white := dos.Attr(dos.White, dos.Black)
 	if a.blink {
 		white = dos.Attr(dos.White|dos.Blink, dos.Black)
@@ -119,7 +119,7 @@ func (a *App) drawMapCursor() {
 
 func (a *App) drawMapFooter(v engine.StateView, span int) {
 	s := a.scr
-	ci := a.curRow*tmGW + a.curCol
+	ci := a.curRow*a.lTmGW + a.curCol
 	idx := ci * a.mapPerCell
 
 	resp := engine.RespUndialed
@@ -128,8 +128,8 @@ func (a *App) drawMapFooter(v engine.StateView, span int) {
 	}
 	ch, color := toneGlyph(resp)
 
-	line := statRow - 1
-	s.Print(0, line, dos.Attr(dos.LightGray, dos.Black), dos.Pad("", scrW))
+	line := a.lStatRow - 1
+	s.Print(0, line, dos.Attr(dos.LightGray, dos.Black), dos.Pad("", a.scr.W))
 	if idx < span {
 		addr := a.eng.Mask().Addr(uint32(idx))
 		s.Print(1, line, dos.Attr(dos.White, dos.Black), addr.String())
@@ -145,8 +145,8 @@ func (a *App) drawMapFooter(v engine.StateView, span int) {
 
 	// Compact live tallies on the right, then the key hints below.
 	tally := fmt.Sprintf("CD:%d Tn:%d Bsy:%d", v.Stats.Carriers, v.Stats.Tones, v.Stats.Busy)
-	s.Print(scrW-len([]rune(tally))-1, line, dos.Attr(dos.LightCyan, dos.Black), tally)
+	s.Print(a.scr.W-len([]rune(tally))-1, line, dos.Attr(dos.LightCyan, dos.Black), tally)
 
 	hints := " M/TAB:dialer   move: mouse / arrows / hjkl   ESC:quit "
-	s.Print(0, statRow, dos.Attr(dos.Black, dos.LightGray), dos.Pad(hints, scrW))
+	s.Print(0, a.lStatRow, dos.Attr(dos.Black, dos.LightGray), dos.Pad(hints, a.scr.W))
 }

@@ -46,13 +46,13 @@ func (a *App) drawSplash() {
 	s.Clear(dos.Attr(dos.LightGray, dos.Black))
 
 	// Faint scanline field for that CRT warm-up look.
-	for y := 0; y < scrH; y++ {
+	for y := 0; y < a.scr.H; y++ {
 		shade := dos.ShadeLight
 		col := dos.DarkGray
 		if y%2 == 0 {
 			shade = ' '
 		}
-		for x := 0; x < scrW; x++ {
+		for x := 0; x < a.scr.W; x++ {
 			s.Set(x, y, shade, dos.Attr(col, dos.Black))
 		}
 	}
@@ -60,7 +60,7 @@ func (a *App) drawSplash() {
 	// Logo, colour cycling per frame.
 	logo := bannerLines("TONELOC")
 	logoW := len([]rune(logo[0]))
-	lx := (scrW - logoW) / 2
+	lx := (a.scr.W - logoW) / 2
 	ly := 4
 	palette := []int{dos.LightCyan, dos.Cyan, dos.LightBlue, dos.LightMagenta, dos.Magenta, dos.Yellow}
 	for r, line := range logo {
@@ -72,7 +72,7 @@ func (a *App) drawSplash() {
 	s.Print(lx+logoW-3, ly+5, dos.Attr(dos.LightGreen, dos.Black), "//Go")
 
 	box := func(y int, attr uint16, text string) {
-		s.Print((scrW-len([]rune(text)))/2, y, attr, text)
+		s.Print((a.scr.W-len([]rune(text)))/2, y, attr, text)
 	}
 	box(11, dos.Attr(dos.White, dos.Black), "T o n e   L o c a t o r   v1.10   ::   IPv4 War Dialer")
 	box(13, dos.Attr(dos.LightGray, dos.Black), "original by Minor Threat & Mucho Maas  ::  1994")

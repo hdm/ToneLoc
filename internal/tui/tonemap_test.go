@@ -24,16 +24,16 @@ func TestToneMapFrame(t *testing.T) {
 
 	app := New(eng, nil)
 	app.setMode(modeToneMap)
-	app.hoverAt(tmGX+1, tmGY+0) // hover the second cell (address index 1)
+	app.hoverAt(app.lTmGX+1, app.lTmGY) // hover the second cell (address index 1)
 	frame := app.Frame()
 
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
-	if len(lines) != scrH {
-		t.Fatalf("expected %d rows, got %d", scrH, len(lines))
+	if len(lines) != minH {
+		t.Fatalf("expected %d rows, got %d", minH, len(lines))
 	}
 	for i, ln := range lines {
-		if got := len([]rune(ln)); got != scrW {
-			t.Fatalf("row %d width = %d, want %d", i, got, scrW)
+		if got := len([]rune(ln)); got != minW {
+			t.Fatalf("row %d width = %d, want %d", i, got, minW)
 		}
 	}
 	for _, want := range []string{"ToneMap", "203.0.113.X", "Carrier", "Undialed", "ESC:quit"} {

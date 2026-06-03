@@ -18,7 +18,7 @@ func (a *App) drawHallOfFame(v engine.StateView) {
 
 	// Title bar.
 	title := fmt.Sprintf(" Hall of Fame   %d carriers / tones bagged ", len(hits))
-	s.Print(0, 0, dos.Attr(dos.Black, dos.Yellow), dos.Pad(title, scrW))
+	s.Print(0, 0, dos.Attr(dos.Black, dos.Yellow), dos.Pad(title, a.scr.W))
 
 	// A little ANSI-art trophy banner up top.
 	art := []string{
@@ -37,53 +37,57 @@ func (a *App) drawHallOfFame(v engine.StateView) {
 	}
 
 	listTop := 7
-	listH := statRow - 1 - listTop // rows available for the list
-	s.Box(0, listTop-1, scrW, listH+2, dos.Attr(dos.LightGreen, dos.Black), true)
-	s.Title(0, listTop-1, scrW, dos.Attr(dos.White, dos.Black), "Carriers & Tones")
+	listH := a.lStatRow - 1 - listTop // rows available for the list
+	s.Box(0, listTop-1, a.scr.W, listH+2, dos.Attr(dos.LightGreen, dos.Black), true)
+	s.Title(0, listTop-1, a.scr.W, dos.Attr(dos.White, dos.Black), "Carriers & Tones")
 
 	if len(hits) == 0 {
 		s.Print(3, listTop+1, dos.Attr(dos.DarkGray, dos.Black),
 			"No carriers yet. Keep dialing -- the good stuff is out there.")
 	}
 
-	// Clamp scroll and render the visible window (newest first).
-	maxScroll := len(hits) - listH
-	if maxScroll < 0 {
-		maxScroll = 0
+	// Selection (newest-first) drives the scroll window.
+	if a.hofSel >= len(hits) {
+		a.hofSel = len(hits) - 1
 	}
-	if a.hofScroll > maxScroll {
-		a.hofScroll = maxScroll
+	if a.hofSel < 0 {
+		a.hofSel = 0
+	}
+	if a.hofSel < a.hofScroll {
+		a.hofScroll = a.hofSel
+	}
+	if a.hofSel >= a.hofScroll+listH {
+		a.hofScroll = a.hofSel - listH + 1
 	}
 	for row := 0; row < listH; row++ {
-		i := len(hits) - 1 - (row + a.hofScroll)
+		idx := row + a.hofScroll // selection index (newest-first)
+		i := len(hits) - 1 - idx // into hits slice
 		if i < 0 {
 			break
 		}
 		h := hits[i]
 		y := listTop + row
-		num := fmt.Sprintf("%3d.", len(hits)-(row+a.hofScroll))
-		s.Print(2, y, dos.Attr(dos.DarkGray, dos.Black), num)
-
+		sel := idx == a.hofSel
+		bg := dos.Black
+		if sel {
+			bg = dos.Blue
+		}
+		s.Print(1, y, dos.Attr(dos.LightGray, bg), dos.Pad("", a.scr.W-2))
+		s.Print(1, y, dos.Attr(dos.White, bg), map[bool]string{true: "►", false: " "}[sel])
+		s.Print(2, y, dos.Attr(dos.DarkGray, bg), fmt.Sprintf("%3d.", idx+1))
 		tagColor := dos.LightGreen
 		if h.Resp == engine.RespTone {
 			tagColor = dos.Yellow
 		}
-		s.Print(7, y, dos.Attr(dos.White, dos.Black), dos.Pad(h.Target, 22))
-		s.Print(30, y, dos.Attr(tagColor, dos.Black), dos.Pad(h.Resp.Tag(), 12))
+		s.Print(7, y, dos.Attr(dos.White, bg), dos.Pad(h.Target, 22))
+		s.Print(30, y, dos.Attr(tagColor, bg), dos.Pad(h.Resp.Tag(), 12))
 		if h.Banner != "" {
-			s.Print(43, y, dos.Attr(dos.LightCyan, dos.Black), dos.Pad(h.Banner, scrW-44))
+			s.Print(43, y, dos.Attr(dos.LightCyan, bg), dos.Pad(h.Banner, a.scr.W-44))
 		}
 	}
 
-	// Scroll indicator.
-	if maxScroll > 0 {
-		ind := fmt.Sprintf(" %d-%d of %d ", a.hofScroll+1,
-			min2(a.hofScroll+listH, len(hits)), len(hits))
-		s.Print(scrW-len([]rune(ind))-2, listTop-1, dos.Attr(dos.LightGreen, dos.Black), ind)
-	}
-
-	hints := " M/TAB:next view   F:hall of fame   j/k or arrows:scroll   ESC:quit "
-	s.Print(0, statRow, dos.Attr(dos.Black, dos.LightGray), dos.Pad(hints, scrW))
+	hints := " M/TAB:next view   j/k or arrows:select   ENTER:detail   B:brute   ESC:quit "
+	s.Print(0, a.lStatRow, dos.Attr(dos.Black, dos.LightGray), dos.Pad(hints, a.scr.W))
 }
 
 func min2(a, b int) int {

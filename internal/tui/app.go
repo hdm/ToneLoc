@@ -11,32 +11,16 @@ import (
 	"io"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hdm/toneloc/internal/dos"
 	"github.com/hdm/toneloc/internal/engine"
 )
 
-const (
-	scrW, scrH = 80, 25
-
-	// Activity Log (left half).
-	actX, actY, actW, actH = 0, 0, 46, 22
-	// Modem window (top right).
-	modX, modY, modW, modH = 46, 0, 34, 8
-	// Statistics window (bottom right).
-	stX, stY, stW, stH = 46, 8, 34, 14
-	// Bottom rows.
-	meterRow = 22
-	copyRow  = 23
-	statRow  = 24
-
-	// ToneMap grid: a dense block of cells (left) plus a legend (right),
-	// echoing the original TONEMAP.EXE layout.
-	tmGX, tmGY = 1, 2   // grid origin (col,row)
-	tmGW, tmGH = 54, 19 // grid size in cells
-	tmLegendX  = 57     // legend column
-)
+// minW/minH are the smallest grid we lay out for; smaller terminals still work
+// but may clip. There is no upper clamp -- ToneLoc fills whatever space it gets.
+const minW, minH = 80, 25
 
 // App renders an engine.State to a dos.Screen and feeds keystrokes back to the
 // engine.
@@ -49,6 +33,14 @@ type App struct {
 	frame   int
 	scanCol int // copyright colour cycling, for that restless DOS feel
 
+	// Layout, recomputed for the current terminal size (relayout). The screen
+	// is no longer fixed at 80x25 -- it fills the real terminal / browser size.
+	lActW, lActH                           int
+	lModX, lModW, lModH                    int
+	lStX, lStY, lStW, lStH                 int
+	lMeterRow, lCopyRow, lStatRow          int
+	lTmGX, lTmGY, lTmGW, lTmGH, lTmLegendX int
+
 	mode    viewMode
 	mouseOn bool
 
@@ -58,7 +50,8 @@ type App struct {
 	mapPerCell     int
 	mapAt          time.Time
 
-	// Hall of Fame scroll offset.
+	// Hall of Fame selection + scroll.
+	hofSel    int
 	hofScroll int
 
 	// Services view selection/scroll/detail.
@@ -78,6 +71,29 @@ type App struct {
 	// Sound-cue edge detection (the web view turns these into modem audio).
 	prevCarriers, prevTones, prevBusy int
 	prevTarget                        string
+
+	// Pending resize (terminal SIGWINCH or browser resize), applied on the
+	// render goroutine.
+	resizeMu     sync.Mutex
+	pendW, pendH int
+}
+
+// Resize requests a new screen size; applied on the next render tick, so it is
+// safe to call from a signal handler or the websocket reader.
+func (a *App) Resize(w, h int) {
+	a.resizeMu.Lock()
+	a.pendW, a.pendH = w, h
+	a.resizeMu.Unlock()
+}
+
+func (a *App) takeResize() (w, h int, ok bool) {
+	a.resizeMu.Lock()
+	defer a.resizeMu.Unlock()
+	if a.pendW == 0 {
+		return 0, 0, false
+	}
+	w, h, a.pendW, a.pendH = a.pendW, a.pendH, 0, 0
+	return w, h, true
 }
 
 type viewMode int
@@ -90,10 +106,59 @@ const (
 	modeCount
 )
 
-// New builds an App that draws to out.
+// New builds an App that draws to out at the default 80x25; call SetSize to
+// grow it to the real terminal.
 func New(eng *engine.Engine, out io.Writer) *App {
-	s := dos.New(scrW, scrH)
-	return &App{scr: s, eng: eng, out: out}
+	a := &App{eng: eng, out: out}
+	a.SetSize(minW, minH)
+	return a
+}
+
+// SetSize resizes the screen and recomputes the layout for w x h cells (e.g.
+// from the terminal size or a browser resize). Sizes below the 80x25 floor are
+// clamped up.
+func (a *App) SetSize(w, h int) {
+	if w < minW {
+		w = minW
+	}
+	if h < minH {
+		h = minH
+	}
+	if a.scr != nil && a.scr.W == w && a.scr.H == h {
+		return
+	}
+	a.scr = dos.New(w, h)
+	a.relayout(w, h)
+}
+
+// relayout positions the windows for the current size: the right-hand column
+// (Modem over Statistics) keeps a readable fixed-ish width while the Activity
+// Log soaks up the rest, and the meter/status rows pin to the bottom.
+func (a *App) relayout(w, h int) {
+	right := w * 42 / 100
+	if right < 34 {
+		right = 34
+	}
+	if right > 52 {
+		right = 52
+	}
+	a.lActW = w - right
+	a.lActH = h - 3
+	a.lModX, a.lModW = a.lActW, right
+	a.lModH = (h - 3) / 3
+	if a.lModH < 7 {
+		a.lModH = 7
+	}
+	if a.lModH > 14 {
+		a.lModH = 14
+	}
+	a.lStX, a.lStY, a.lStW = a.lActW, a.lModH, right
+	a.lStH = (h - 3) - a.lModH
+	a.lMeterRow, a.lCopyRow, a.lStatRow = h-3, h-2, h-1
+	a.lTmGX, a.lTmGY = 1, 2
+	a.lTmLegendX = w - 23
+	a.lTmGW = a.lTmLegendX - 2
+	a.lTmGH = h - 5
 }
 
 // Run renders at ~20fps and dispatches input keys until the engine is done or
@@ -135,6 +200,10 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 				a.escState = 0
 				a.eng.Quit()
 				return nil
+			}
+			if w, h, ok := a.takeResize(); ok {
+				a.SetSize(w, h)
+				io.WriteString(a.out, "\x1b[2J") // clear; new screen repaints fully
 			}
 			a.frame++
 			a.draw(a.eng.State().Snapshot())
@@ -259,6 +328,10 @@ func (a *App) handleNormal(b byte) bool {
 			a.moveCursor(0, -1)
 		case 'j':
 			a.moveCursor(0, 1)
+		case '\r', '\n': // jump to the selected hit's full service detail
+			a.openHitDetail()
+		case 'b', 'B':
+			a.bruteHit()
 		}
 		return false
 	}
@@ -319,6 +392,46 @@ func (a *App) bruteSelected() {
 	}
 }
 
+// hitService maps the selected Hall-of-Fame hit to its discovered Service, if
+// one exists.
+func (a *App) hitService() (engine.Service, bool) {
+	hits := a.eng.State().HitsSnapshot()
+	if a.hofSel < 0 || a.hofSel >= len(hits) {
+		return engine.Service{}, false
+	}
+	tgt := hits[len(hits)-1-a.hofSel].Target // list is newest-first
+	for _, sv := range a.eng.State().ServicesSnapshot() {
+		if sv.Target() == tgt {
+			return sv, true
+		}
+	}
+	return engine.Service{}, false
+}
+
+// openHitDetail jumps from the Hall of Fame to the selected hit's full service
+// detail in the Services view.
+func (a *App) openHitDetail() {
+	sv, ok := a.hitService()
+	if !ok {
+		return
+	}
+	svcs := a.eng.State().ServicesSnapshot()
+	for i := range svcs {
+		if svcs[i].Key() == sv.Key() {
+			a.svcSel = i
+			a.svcDetail = true
+			a.setMode(modeServices)
+			return
+		}
+	}
+}
+
+func (a *App) bruteHit() {
+	if sv, ok := a.hitService(); ok && sv.Brutable {
+		a.eng.StartBrute(sv.Key())
+	}
+}
+
 // enableMouse toggles xterm any-event mouse reporting in SGR mode, so hovering
 // the ToneMap streams motion events we can read off the same input channel.
 func (a *App) enableMouse(on bool) {
@@ -342,14 +455,14 @@ func (a *App) moveCursor(dx, dy int) {
 		return
 	}
 	if a.mode == modeHallOfFame {
-		a.hofScroll += dy // clamped at draw time against the list length
-		if a.hofScroll < 0 {
-			a.hofScroll = 0
+		a.hofSel += dy // selection; scroll is derived at draw time
+		if a.hofSel < 0 {
+			a.hofSel = 0
 		}
 		return
 	}
-	a.curCol = clamp(a.curCol+dx, 0, tmGW-1)
-	a.curRow = clamp(a.curRow+dy, 0, tmGH-1)
+	a.curCol = clamp(a.curCol+dx, 0, a.lTmGW-1)
+	a.curRow = clamp(a.curRow+dy, 0, a.lTmGH-1)
 }
 
 // hoverAt maps absolute screen coords to a ToneMap cell (if inside the grid).
@@ -357,9 +470,9 @@ func (a *App) hoverAt(sx, sy int) {
 	if a.mode != modeToneMap {
 		return
 	}
-	cx := sx - tmGX
-	cy := sy - tmGY
-	if cx < 0 || cy < 0 || cx >= tmGW || cy >= tmGH {
+	cx := sx - a.lTmGX
+	cy := sy - a.lTmGY
+	if cx < 0 || cy < 0 || cx >= a.lTmGW || cy >= a.lTmGH {
 		return
 	}
 	a.curCol = cx
@@ -448,11 +561,11 @@ func (a *App) draw(v engine.StateView) {
 func (a *App) drawActivity(v engine.StateView) {
 	s := a.scr
 	frame := dos.Attr(dos.LightCyan, dos.Blue)
-	s.Fill(actX, actY, actW, actH, ' ', dos.Attr(dos.LightGray, dos.Blue))
-	s.Box(actX, actY, actW, actH, frame, true)
-	s.Title(actX, actY, actW, dos.Attr(dos.Yellow, dos.Blue), "Activity Log")
+	s.Fill(0, 0, a.lActW, a.lActH, ' ', dos.Attr(dos.LightGray, dos.Blue))
+	s.Box(0, 0, a.lActW, a.lActH, frame, true)
+	s.Title(0, 0, a.lActW, dos.Attr(dos.Yellow, dos.Blue), "Activity Log")
 
-	innerH := actH - 2
+	innerH := a.lActH - 2
 	lines := v.Activity
 	if len(lines) > innerH {
 		lines = lines[len(lines)-innerH:]
@@ -469,24 +582,24 @@ func (a *App) drawActivity(v engine.StateView) {
 		case contains(ln, "Noted"):
 			attr = dos.Attr(dos.LightMagenta, dos.Blue)
 		}
-		s.Print(actX+2, actY+1+i, attr, dos.Pad(ln, actW-3))
+		s.Print(0+2, 0+1+i, attr, dos.Pad(ln, a.lActW-3))
 	}
 }
 
 func (a *App) drawModem(v engine.StateView) {
 	s := a.scr
 	frame := dos.Attr(dos.LightGreen, dos.Black)
-	s.Fill(modX, modY, modW, modH, ' ', dos.Attr(dos.Green, dos.Black))
-	s.Box(modX, modY, modW, modH, frame, true)
-	s.Title(modX, modY, modW, dos.Attr(dos.White, dos.Black), "Modem")
+	s.Fill(a.lModX, 0, a.lModW, a.lModH, ' ', dos.Attr(dos.Green, dos.Black))
+	s.Box(a.lModX, 0, a.lModW, a.lModH, frame, true)
+	s.Title(a.lModX, 0, a.lModW, dos.Attr(dos.White, dos.Black), "Modem")
 
-	innerH := modH - 2
+	innerH := a.lModH - 2
 	lines := v.Modem
 	if len(lines) > innerH {
 		lines = lines[len(lines)-innerH:]
 	}
 	for i, ln := range lines {
-		s.Print(modX+2, modY+1+i, dos.Attr(dos.LightGreen, dos.Black), dos.Pad(ln, modW-3))
+		s.Print(a.lModX+2, 0+1+i, dos.Attr(dos.LightGreen, dos.Black), dos.Pad(ln, a.lModW-3))
 	}
 }
 
@@ -496,12 +609,12 @@ func (a *App) drawStats(v engine.StateView) {
 	itemAttr := dos.Attr(dos.Yellow, dos.Black)
 	valAttr := dos.Attr(dos.White, dos.Black)
 
-	s.Fill(stX, stY, stW, stH, ' ', dos.Attr(dos.LightGray, dos.Black))
-	s.Box(stX, stY, stW, stH, frame, true)
-	s.Title(stX, stY, stW, dos.Attr(dos.White, dos.Black), "Statistics")
+	s.Fill(a.lStX, a.lStY, a.lStW, a.lStH, ' ', dos.Attr(dos.LightGray, dos.Black))
+	s.Box(a.lStX, a.lStY, a.lStW, a.lStH, frame, true)
+	s.Title(a.lStX, a.lStY, a.lStW, dos.Attr(dos.White, dos.Black), "Statistics")
 
-	col := stX + 2
-	row := stY + 1
+	col := a.lStX + 2
+	row := a.lStY + 1
 	put := func(label, val string) {
 		s.Print(col, row, itemAttr, label)
 		s.Print(col+len([]rune(label)), row, valAttr, val)
@@ -516,8 +629,8 @@ func (a *App) drawStats(v engine.StateView) {
 	put(" ETA     : ", eta(v))
 
 	// Divider with "Found" label, like the original.
-	s.HLine(stX, row, stW, frame)
-	s.Print(stX+(stW-7)/2, row, dos.Attr(dos.LightMagenta, dos.Black), "►Found◄")
+	s.HLine(a.lStX, row, a.lStW, frame)
+	s.Print(a.lStX+(a.lStW-7)/2, row, dos.Attr(dos.LightMagenta, dos.Black), "►Found◄")
 	row++
 
 	twoCol := func(l1 string, v1 int, l2 string, v2 int) {
@@ -532,13 +645,13 @@ func (a *App) drawStats(v engine.StateView) {
 	twoCol("NoDT :", v.Stats.NoDialtone, "Ring:", v.Stats.Ringout)
 
 	// Last hits list fills any remaining rows.
-	for i := len(v.Found) - 1; i >= 0 && row < stY+stH-1; i-- {
+	for i := len(v.Found) - 1; i >= 0 && row < a.lStY+a.lStH-1; i-- {
 		f := v.Found[i]
 		c := dos.Attr(dos.LightGreen, dos.Black)
 		if f.Resp == engine.RespTone {
 			c = dos.Attr(dos.Yellow, dos.Black)
 		}
-		s.Print(col, row, c, dos.Pad(" "+f.Target, stW-3))
+		s.Print(col, row, c, dos.Pad(" "+f.Target, a.lStW-3))
 		row++
 	}
 }
@@ -546,9 +659,9 @@ func (a *App) drawStats(v engine.StateView) {
 func (a *App) drawMeter(v engine.StateView) {
 	s := a.scr
 	label := "Dialing: " + dos.Pad(v.Target, 21)
-	s.Print(actX, meterRow, dos.Attr(dos.White, dos.Black), label)
-	mx := actX + len([]rune(label)) + 1
-	mw := scrW - mx - 1
+	s.Print(0, a.lMeterRow, dos.Attr(dos.White, dos.Black), label)
+	mx := 0 + len([]rune(label)) + 1
+	mw := a.scr.W - mx - 1
 	if mw < 8 {
 		mw = 8
 	}
@@ -556,7 +669,7 @@ func (a *App) drawMeter(v engine.StateView) {
 	if v.Stats.Max > 0 && v.Stats.Dialed >= int(v.Stats.Max) {
 		fg = dos.Yellow
 	}
-	s.Meter(mx, meterRow, mw, v.Meter, fg, dos.DarkGray, dos.Black)
+	s.Meter(mx, a.lMeterRow, mw, v.Meter, fg, dos.DarkGray, dos.Black)
 }
 
 func (a *App) drawChrome(v engine.StateView) {
@@ -565,11 +678,11 @@ func (a *App) drawChrome(v engine.StateView) {
 	cr := fmt.Sprintf("ToneLoc/Go 1.10 [%s] \"war-dialing the IPv4 phone book\"", backendName(v.Backend))
 	colors := []int{dos.LightCyan, dos.LightMagenta, dos.Yellow, dos.LightGreen, dos.White}
 	cc := colors[(a.frame/8)%len(colors)]
-	s.Print((scrW-len([]rune(cr)))/2, copyRow, dos.Attr(cc, dos.Black), cr)
+	s.Print((a.scr.W-len([]rune(cr)))/2, a.lCopyRow, dos.Attr(cc, dos.Black), cr)
 
 	// Bottom status line: keys on the left, transient message blinking right.
 	keys := " ESC:quit  SPC:abort  P:pause  R:redial  S:speaker  X:+wait  N/C/F/G/V/Y:note "
-	s.Print(0, statRow, dos.Attr(dos.Black, dos.LightGray), dos.Pad(keys, scrW))
+	s.Print(0, a.lStatRow, dos.Attr(dos.Black, dos.LightGray), dos.Pad(keys, a.scr.W))
 
 	msg := v.Status
 	if v.Paused {
@@ -583,7 +696,7 @@ func (a *App) drawChrome(v engine.StateView) {
 		if !a.blink && !v.Done {
 			attr = dos.Attr(dos.Red, dos.LightGray)
 		}
-		s.Print(scrW-len([]rune(msg))-1, statRow, attr, msg)
+		s.Print(a.scr.W-len([]rune(msg))-1, a.lStatRow, attr, msg)
 	}
 }
 

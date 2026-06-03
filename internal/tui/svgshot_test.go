@@ -37,8 +37,9 @@ func TestGenerateScreenshot(t *testing.T) {
 	splash.frame = 9
 	write(t, dir+"/toneloc-splash.svg", splash.FrameSVG())
 
-	// Dialer view.
+	// Dialer view, at a larger terminal to show the responsive layout.
 	dialer := New(eng, nil)
+	dialer.SetSize(132, 42)
 	dialer.frame = 4
 	write(t, dir+"/toneloc-dialer.svg", dialer.FrameSVG())
 
@@ -69,12 +70,14 @@ func TestGenerateScreenshot(t *testing.T) {
 	time.Sleep(2500 * time.Millisecond) // let some brutes finish/compromise
 
 	svcView := New(eng, nil)
+	svcView.SetSize(132, 42)
 	svcView.setMode(modeServices)
 	svcView.frame = 4
 	write(t, dir+"/toneloc-services.svg", svcView.FrameSVG())
 
 	// Detail card for the first compromised (or brutable) service.
 	detail := New(eng, nil)
+	detail.SetSize(132, 42)
 	detail.setMode(modeServices)
 	svcs := eng.State().ServicesSnapshot()
 	for i, sv := range svcs {

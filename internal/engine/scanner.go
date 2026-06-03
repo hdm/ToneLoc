@@ -21,6 +21,24 @@ type Job struct {
 	Limit     uint64        // max dials this run (0 = whole space)
 	Backend   string        // "sim", "connect" or "zmap"
 	SessionID string        // resume an existing session log (else a new id)
+
+	// Recon tool toggles. nerva (UDP + fingerprinting) is on by default; brutus
+	// (credential testing) is off by default except in sim mode -- you opt in to
+	// hammering real services. The No* flags force-disable.
+	NoNerva  bool
+	Brutus   bool
+	NoBrutus bool
+}
+
+// nervaEnabled reports whether nerva (UDP discovery + fingerprinting) runs.
+func (j *Job) nervaEnabled() bool { return !j.NoNerva }
+
+// brutusEnabled reports whether brutus credential testing is allowed.
+func (j *Job) brutusEnabled() bool {
+	if j.NoBrutus {
+		return false
+	}
+	return j.Brutus || j.Backend == "sim"
 }
 
 // maskList returns the masks to scan, preferring Masks but falling back to the

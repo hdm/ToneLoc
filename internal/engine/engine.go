@@ -40,7 +40,22 @@ type Engine struct {
 	toolkit   Toolkit         // nerva (fingerprint/udp) + brutus (creds)
 	bgCtx     context.Context // long-lived context for tool goroutines
 	sessionID string          // resumable session log id
+	nervaOn   bool            // nerva UDP discovery + fingerprinting enabled
+	brutusOn  bool            // brutus credential testing enabled
 }
+
+func onOff(b bool) string {
+	if b {
+		return "ON"
+	}
+	return "off"
+}
+
+// NervaEnabled reports whether nerva discovery/fingerprinting is on.
+func (e *Engine) NervaEnabled() bool { return e.nervaOn }
+
+// BrutusEnabled reports whether brutus credential testing is allowed.
+func (e *Engine) BrutusEnabled() bool { return e.brutusOn }
 
 type segment struct {
 	maskIdx int
@@ -159,7 +174,9 @@ func New(ctx context.Context, job Job) (*Engine, error) {
 	// Recon tools: nerva (UDP discovery + fingerprinting) and brutus (creds).
 	e.toolkit = NewToolkit(job.Backend, job.Seed)
 	e.bgCtx = context.Background()
-	e.logf("Recon tools: %s", e.toolkit.Names)
+	e.nervaOn = job.nervaEnabled()
+	e.brutusOn = job.brutusEnabled()
+	e.logf("Recon: nerva %s, brutus %s   (%s)", onOff(e.nervaOn), onOff(e.brutusOn), e.toolkit.Names)
 	e.sessionID = job.SessionID
 	if e.sessionID == "" {
 		e.sessionID = newSessionID()

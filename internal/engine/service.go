@@ -56,13 +56,14 @@ func (c Cred) String() string {
 // fingerprints the application/banner on every port; brutus (on demand) tests
 // common credentials. Everything about a host:port lives here.
 type Service struct {
-	Addr    netip.Addr `json:"-"`
-	IP      string     `json:"ip"`
-	Port    uint16     `json:"port"`
-	Proto   string     `json:"proto"` // "tcp" | "udp"
-	App     string     `json:"app"`   // nerva fingerprint, e.g. "ssh", "http", "mysql"
-	Banner  string     `json:"banner,omitempty"`
-	Version string     `json:"version,omitempty"`
+	Addr          netip.Addr `json:"-"`
+	IP            string     `json:"ip"`
+	Port          uint16     `json:"port"`
+	Proto         string     `json:"proto"`                    // "tcp" | "udp"
+	App           string     `json:"app"`                      // nerva fingerprint, e.g. "ssh", "http", "mysql"
+	Banner        string     `json:"banner,omitempty"`         // nerva banner
+	Version       string     `json:"version,omitempty"`        // nerva version
+	ConnectBanner string     `json:"connect_banner,omitempty"` // banner grabbed by connect/zmap
 
 	Brutable    bool       `json:"brutable"`              // brutus supports this protocol
 	Brute       BruteState `json:"-"`                     // live state (not persisted as int)

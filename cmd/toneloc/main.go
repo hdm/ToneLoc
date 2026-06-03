@@ -265,6 +265,14 @@ func parseArgs(args []string) (options, error) {
 					i++
 					opt.webAddr = args[i]
 				}
+			case "nerva":
+				j.NoNerva = false
+			case "no-nerva":
+				j.NoNerva = true
+			case "brutus":
+				j.Brutus = true
+			case "no-brutus":
+				j.NoBrutus = true
 			case "tls":
 				opt.tls = true
 			case "domain":
@@ -510,6 +518,11 @@ func runTerminalWith(job engine.Job, sess *engine.Session) error {
 	}()
 
 	app := tui.New(eng, os.Stdout)
+	// Fill the real terminal instead of a fixed 80x25, and follow resizes.
+	if w, h, err := term.GetSize(int(os.Stdin.Fd())); err == nil {
+		app.SetSize(w, h)
+	}
+	go watchTerminalResize(int(os.Stdin.Fd()), app)
 	return app.Run(ctx, keys)
 }
 
@@ -566,6 +579,8 @@ OPTIONS:
 FLAGS:
   --backend sim|connect|zmap   scan backend (default sim)
   --sim --connect --zmap       shorthands for --backend
+  --nerva / --no-nerva         nerva UDP + fingerprinting (default ON)
+  --brutus / --no-brutus       brutus credential testing (default OFF; ON in sim)
   --wait 4s                    listen time per dial (the meter length)
   --rings 6                    rings before Ringout
   --seed N                     reproducible scan order (0 = random)

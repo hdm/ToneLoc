@@ -60,21 +60,16 @@
   #vignette{position:absolute;inset:0;z-index:7;pointer-events:none;border-radius:14px/12px;
     box-shadow: inset 0 0 130px rgba(0,0,0,.65);}
 
-  /* Occasional, brief glitch tear (not a flicker; fires rarely). */
-  #screen.glitch #term{animation:glitch .28s steps(2) 1;}
-  @keyframes glitch{
-    0%{transform:translate(0,0);}
-    25%{transform:translate(-4px,1px);filter:drop-shadow(6px 0 0 rgba(255,0,80,.6)) drop-shadow(-6px 0 0 rgba(0,255,210,.6)) hue-rotate(18deg);clip-path:inset(8% 0 70% 0);}
-    50%{transform:translate(5px,-2px);clip-path:inset(58% 0 14% 0);}
-    75%{transform:translate(-3px,0);clip-path:inset(30% 0 40% 0);}
-    100%{transform:translate(0,0);}
-  }
-
-  #label{display:block;margin-top:14px;text-align:center;color:#6a6a6a;font-size:12px;
-    letter-spacing:2px;white-space:normal;max-width:100%;}
-  #label b{color:var(--amber);}
+  #label{display:block;margin-top:8px;text-align:center;color:#4a4a4a;font-size:11px;}
   #status{position:absolute;top:8px;right:14px;z-index:9;font-size:11px;color:#555;}
   #status.live{color:var(--green);text-shadow:0 0 6px var(--green);}
+
+  /* Restart overlay shown when the connection drops. */
+  #restart{position:absolute;inset:0;z-index:12;display:none;align-items:center;justify-content:center;
+    flex-direction:column;background:rgba(0,0,0,.82);color:var(--green);font:16px monospace;
+    text-shadow:0 0 6px var(--phos);cursor:pointer;text-align:center;}
+  #restart.show{display:flex;}
+  #restart b{color:var(--amber);font-size:20px;}
 
   #tools{position:fixed;top:10px;left:12px;z-index:20;display:flex;gap:6px;}
   #tools button{background:rgba(20,20,20,.6);color:#6a6a6a;border:1px solid #333;border-radius:6px;
@@ -111,8 +106,9 @@
       <div id="noise"></div>
       <div id="vignette"></div>
       <div id="boot"></div>
+      <div id="restart"><b>CARRIER LOST</b><br><br>click or press a key to redial</div>
     </div>
-    <div id="label">T O N E L O C / G O &nbsp;&mdash;&nbsp; <b>ghostty.js</b> terminal &nbsp;|&nbsp; click + type. M=views, S=sound, ESC=quit.</div>
+    <div id="label">click + type &middot; M views &middot; B brute &middot; S sound &middot; ESC quit</div>
   </div>
 </div>
 
@@ -141,34 +137,12 @@
   tick();
 })();
 
-// ---- Scale the monitor to fill the viewport (80x25 at most, kept crisp) ---
-const bezel = document.getElementById('bezel');
-function fit(){
-  const w = bezel.offsetWidth, h = bezel.offsetHeight;
-  if(!w || !h) return;
-  const s = Math.min(innerWidth / w, innerHeight / h);
-  bezel.style.transform = 'scale(' + Math.max(0.1, s) + ')';
-}
-addEventListener('resize', fit);
-document.addEventListener('fullscreenchange', ()=>setTimeout(fit, 60));
-new ResizeObserver(fit).observe(document.getElementById('screen'));
-
 // ---- Fullscreen toggle ----------------------------------------------------
 function toggleFS(){
   if(document.fullscreenElement) document.exitFullscreen();
   else (document.documentElement.requestFullscreen?.() || Promise.resolve()).catch(()=>{});
 }
 document.getElementById('fsbtn').addEventListener('click', (e)=>{ e.preventDefault(); toggleFS(); });
-
-// ---- Occasional glitch tear (rare; not a flicker) -------------------------
-(function(){
-  const screen = document.getElementById('screen');
-  (function loop(){
-    setTimeout(()=>{ screen.classList.add('glitch');
-      setTimeout(()=>screen.classList.remove('glitch'), 300); loop();
-    }, 9000 + Math.random()*12000);
-  })();
-})();
 
 // ---- Fake BIOS/POST boot sequence ----------------------------------------
 const bootEl = document.getElementById('boot');
@@ -222,15 +196,16 @@ const Modem = (function(){
 // ---- Terminal: ghostty.js first, xterm.js fallback -----------------------
 const statusEl = document.getElementById('status');
 const mount = document.getElementById('term');
+const restartEl = document.getElementById('restart');
 function setStatus(t,live){ statusEl.textContent=(live?'● ':'○ ')+t; statusEl.className=live?'live':''; }
-const COLS=80, ROWS=25;
+const FONTSZ = 15;
 
 async function makeTerminal(){
   const theme={ background:'#000000', foreground:'#aaaaaa', cursor:'#33ff66' };
   try{
     const g = await import('https://cdn.jsdelivr.net/npm/ghostty-web/+esm');
     if (g.init) await g.init();
-    const term = new g.Terminal({ fontSize:16, theme });
+    const term = new g.Terminal({ fontSize:FONTSZ, theme });
     term.open(mount);
     return { term, kind:'ghostty.js' };
   }catch(e){
@@ -238,34 +213,43 @@ async function makeTerminal(){
     const l=document.createElement('link'); l.rel='stylesheet';
     l.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css'; document.head.appendChild(l);
     const x = await import('https://cdn.jsdelivr.net/npm/@xterm/xterm/+esm');
-    const term = new x.Terminal({ fontSize:16, theme, cols:COLS, rows:ROWS, convertEol:false });
+    const term = new x.Terminal({ fontSize:FONTSZ, theme, convertEol:false });
     term.open(mount);
     return { term, kind:'xterm.js (fallback)' };
   }
 }
 
-let SID = null; // per-session id for save/load, delivered by the server
+let SID = null, WS = null, TERM = null, closed = false;
+
+// fitTerminal sizes the terminal to fill the window (more rows/cols, not a
+// scaled 80x25) and tells the server the new size so the UI re-lays-out.
+function fitTerminal(){
+  if(!TERM) return;
+  const availW = innerWidth * 0.96 - 64;   // minus bezel + term padding
+  const availH = innerHeight * 0.92 - 64;
+  const cols = Math.max(80,  Math.min(240, Math.floor(availW / (FONTSZ*0.60))));
+  const rows = Math.max(25,  Math.min(70,  Math.floor(availH / (FONTSZ*1.18))));
+  try{ TERM.resize(cols, rows); }catch{}
+  if (WS && WS.readyState===WebSocket.OPEN) WS.send('\x1b]1339;'+cols+';'+rows+'\x07');
+}
+addEventListener('resize', fitTerminal);
+
 (async () => {
   document.getElementById('screen').addEventListener('animationend', e=>{
     if(e.animationName==='poweron') document.getElementById('screen').classList.remove('boot');
   });
 
   const { term, kind } = await makeTerminal();
-  // Force exactly 80x25 (a few times, since the WASM terminal sizes async) so
-  // the render never leaves blank columns on the right.
-  const lockSize = ()=>{ try{ term.resize(COLS, ROWS); }catch{} fit(); };
-  lockSize(); requestAnimationFrame(lockSize); setTimeout(lockSize, 120); setTimeout(lockSize, 400);
-
-  document.getElementById('label').innerHTML =
-    'T O N E L O C / G O &mdash; <b>'+kind+'</b> &nbsp;|&nbsp; click + type. M=views, F=hall of fame, S=sound, ESC=quit.';
+  TERM = term;
+  fitTerminal(); requestAnimationFrame(fitTerminal); setTimeout(fitTerminal,150); setTimeout(fitTerminal,500);
 
   const proto = location.protocol==='https:' ? 'wss' : 'ws';
-  const ws = new WebSocket(proto+'://'+location.host+'/ws');
+  const ws = new WebSocket(proto+'://'+location.host+'/ws'); WS = ws;
 
-  ws.onopen = () => { setStatus('carrier',true); lockSize();
+  ws.onopen = () => { setStatus('carrier',true); fitTerminal();
     setTimeout(()=>{ bootEl.style.transition='opacity .4s'; bootEl.style.opacity='0'; setTimeout(()=>bootEl.style.display='none',420); }, 250);
     mount.focus?.(); };
-  ws.onclose = () => { setStatus('NO CARRIER',false); term.write('\r\n\x1b[31m-- carrier lost --\x1b[0m\r\n'); };
+  ws.onclose = () => { setStatus('NO CARRIER',false); closed = true; restartEl.classList.add('show'); };
   ws.onerror = () => setStatus('error',false);
   ws.onmessage = (e) => {
     let data = typeof e.data==='string' ? e.data : new TextDecoder().decode(e.data);
@@ -280,6 +264,11 @@ let SID = null; // per-session id for save/load, delivered by the server
   const wake = () => Modem.resume();
   mount.addEventListener('click', ()=>{ mount.focus(); wake(); });
   addEventListener('keydown', wake, { once:false });
+
+  // Restart after the connection drops: any click/keypress redials a fresh scan.
+  const redial = () => { if (closed) location.reload(); };
+  restartEl.addEventListener('click', redial);
+  addEventListener('keydown', redial, true);
 
   // ---- Save / load scan state ----
   const toast = (m)=>{ const t=document.getElementById('toast'); t.textContent=m; t.classList.add('show');

@@ -7,6 +7,7 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/tls"
@@ -17,6 +18,8 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"regexp"
+	"strconv"
 	"sync"
 	"time"
 
@@ -196,8 +199,13 @@ func serveSession(conn *websocket.Conn, job engine.Job) {
 
 	go eng.Run(ctx)
 
+	out := &wsWriter{conn: conn}
+	app := tui.New(eng, out)
+
 	keys := make(chan byte, 64)
-	// Reader: browser keystrokes -> engine.
+	// Reader: browser keystrokes -> engine. Resize control messages
+	// (ESC ]1339;COLS;ROWS BEL) are intercepted and applied to the app so the
+	// UI fills the browser terminal rather than a fixed 80x25.
 	go func() {
 		defer close(keys)
 		for {
@@ -206,7 +214,7 @@ func serveSession(conn *websocket.Conn, job engine.Job) {
 				cancel()
 				return
 			}
-			for _, b := range msg {
+			for _, b := range parseResize(msg, app) {
 				select {
 				case keys <- b:
 				default:
@@ -215,11 +223,28 @@ func serveSession(conn *websocket.Conn, job engine.Job) {
 		}
 	}()
 
-	out := &wsWriter{conn: conn}
-	app := tui.New(eng, out)
 	if err := app.Run(ctx, keys); err != nil && err != io.EOF {
 		log.Printf("session ended: %v", err)
 	}
+}
+
+// resizeRE matches the browser's resize control sequence: ESC ]1339;COLS;ROWS BEL.
+var resizeRE = regexp.MustCompile("\x1b\\]1339;(\\d+);(\\d+)\x07")
+
+// parseResize applies any resize control sequences in msg to the app and
+// returns the remaining bytes (keystrokes).
+func parseResize(msg []byte, app *tui.App) []byte {
+	if !bytes.Contains(msg, []byte("\x1b]1339;")) {
+		return msg
+	}
+	for _, m := range resizeRE.FindAllSubmatch(msg, -1) {
+		w, _ := strconv.Atoi(string(m[1]))
+		h, _ := strconv.Atoi(string(m[2]))
+		if w > 0 && h > 0 {
+			app.Resize(w, h)
+		}
+	}
+	return resizeRE.ReplaceAll(msg, nil)
 }
 
 // wsWriter adapts a websocket connection to io.Writer, sending each render as a
