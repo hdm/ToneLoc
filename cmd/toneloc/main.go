@@ -268,6 +268,8 @@ func parseArgs(args []string) (options, error) {
 					i++
 					opt.webAddr = args[i]
 				}
+			case "resume":
+				j.Resume = true
 			case "nerva":
 				j.NoNerva = false
 			case "no-nerva":
@@ -605,6 +607,8 @@ FLAGS:
   --tls                        serve HTTPS; issues an ACME cert for --domain
   --domain <name>              domain to issue the ACME certificate for
   --tls-cert <file> --tls-key <file>   use a static cert/key instead of ACME
+  --resume                     resume from the .DAT, skipping already-dialed
+                               targets (default OFF: re-running re-scans)
   --restore <id>               resume a previous scan from its session log
   -V, --help
 
@@ -638,9 +642,9 @@ In the web (--web) version the Speaker toggle (S) drives synthesized modem
 audio: dial tones, busy signals, and the handshake screech on a carrier.
 
 DATA FILES:
-  Results are saved to <DataFile>.DAT and reloaded on the next run, so an
-  interrupted scan resumes where it left off (already-dialed targets are
-  skipped). Autosaves every 15s and on exit.
+  Results are saved to <DataFile>.DAT (autosaves every 15s and on exit). By
+  default a re-run RE-SCANS the range (the .DAT is overwritten); pass --resume
+  to skip already-dialed targets instead.
 
 EXAMPLES:
   toneloc 192.168.1.X /p:22,80,443

@@ -150,12 +150,14 @@ func New(ctx context.Context, job Job) (*Engine, error) {
 
 	e.banner()
 
-	// Always keep a DatFile in memory so the scan is recorded (and can be saved
-	// / downloaded). When a path is set we also load any prior results to resume,
-	// exactly like the original .DAT behaviour, and autosave back to it.
+	// Keep a DatFile in memory so the scan is recorded (and can be saved /
+	// downloaded). By default each run starts fresh and OVERWRITES the .DAT --
+	// re-running the same range re-scans it. Only with --resume (or a restored
+	// session, via Preload) do we load prior results and skip already-dialed
+	// targets.
 	path := datPathFor(job.DataFile)
 	dat := &DatFile{Path: path, Results: map[string]Result{}}
-	if path != "" {
+	if job.Resume && path != "" {
 		if loaded, err := LoadDat(path); err != nil {
 			e.logf("Could not read %s: %v", path, err)
 		} else {
@@ -165,9 +167,9 @@ func New(ctx context.Context, job Job) (*Engine, error) {
 	dat.Mask = masks[0].Text()
 	dat.Ports = job.Ports
 	e.dat = dat
-	if n := len(dat.Results); n > 0 {
+	if job.Resume && len(dat.Results) > 0 {
 		e.seedFromDat(dat)
-		e.logf("Loaded %d previous results from %s", n, job.DataFile)
+		e.logf("Resumed %d previous results from %s", len(dat.Results), job.DataFile)
 	}
 
 	e.probe = e.selectProbe(ctx)

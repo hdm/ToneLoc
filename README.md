@@ -91,8 +91,9 @@ toneloc 203.0.113.X --web :9000         # serve the UI in a browser
   full DOS experience run for anyone, anywhere.
 * **`connect`** — a real TCP `connect()` scan via the Go runtime. Needs no
   special privileges. Reads banners (→ tones).
-* **`zmap`** — drives the **real zmap scanner** from the `zmap-go` module
-  (`tcp_synscan`). This is a raw-packet stateless mass scan, so it needs
+* **`zmap`** — drives the **real zmap scanner in-process** via the `zmap-go`
+  library (`tcp_synscan`: raw socket + SYN crafting + AES probe validation, no
+  subprocess). This is a raw-packet stateless mass scan, so it needs
   `root`/`cap_net_raw` and a live network; if that's unavailable ToneLoc
   transparently falls back to the simulator.
 
@@ -180,10 +181,10 @@ works the same in a real terminal and in the ghostty.js web view.
 
 ### Resuming scans (.DAT files)
 
-Like the original, results are written to a `<DataFile>.DAT` file and reloaded
-on the next run: already-dialed targets are skipped and the stats/ToneMap show
-the prior history, so you can stop and pick a scan back up. It autosaves every
-15 seconds and on exit.
+Results are written to a `<DataFile>.DAT` file (autosaved every 15s and on
+exit). **By default a re-run re-scans the range** — the `.DAT` is overwritten,
+so running the same command twice actually scans twice. Pass **`--resume`** to
+load the prior `.DAT` and skip already-dialed targets instead.
 
 ## The web version (ghostty.js)
 

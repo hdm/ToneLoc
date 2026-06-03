@@ -21,6 +21,7 @@ type Job struct {
 	Limit     uint64        // max dials this run (0 = whole space)
 	Backend   string        // "sim", "connect" or "zmap"
 	SessionID string        // resume an existing session log (else a new id)
+	Resume    bool          // resume from the .DAT (skip already-dialed); default off
 
 	// Recon tool toggles. nerva (UDP + fingerprinting) is on by default; brutus
 	// (credential testing) is off by default except in sim mode -- you opt in to

@@ -68,7 +68,7 @@ func TestEngineResumesFromDat(t *testing.T) {
 	}
 
 	job := Job{DataFile: path, Mask: mask, Ports: ports, WaitDelay: 5 * time.Millisecond,
-		MaxRings: 2, Seed: 42, Backend: "sim"}
+		MaxRings: 2, Seed: 42, Backend: "sim", Resume: true}
 	eng, err := New(context.Background(), job)
 	if err != nil {
 		t.Fatal(err)
