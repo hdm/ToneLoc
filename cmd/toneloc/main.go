@@ -49,13 +49,16 @@ type options struct {
 }
 
 func run(args []string) error {
-	if len(args) > 0 && (args[0] == "-h" || args[0] == "--help" || args[0] == "/?") {
-		usage()
-		return nil
-	}
-	if len(args) > 0 && (args[0] == "-V" || args[0] == "--version") {
-		fmt.Printf("ToneLoc/Go %s -- IPv4 war-dialer powered by zmap-go\n", version)
-		return nil
+	// -h / --help / -help / help / /? anywhere on the command line prints usage.
+	for _, a := range args {
+		switch a {
+		case "-h", "--help", "-help", "help", "/?", "/h":
+			usage()
+			return nil
+		case "-V", "--version", "-version":
+			fmt.Printf("ToneLoc/Go %s -- IPv4 war-dialer powered by zmap-go\n", version)
+			return nil
+		}
 	}
 
 	// The standalone JS game needs no mask, so handle --game before the rest of
@@ -619,13 +622,17 @@ RECON PIPELINE:
 KEYS WHILE DIALING:
   ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait
   N/C/F/G/V/Y annotate the current number
-  M or TAB   cycle views: Dialer -> ToneMap -> Hall of Fame
+  M or TAB   cycle views: Dialer -> ToneMap -> Hall of Fame -> Services
 
 VIEWS:
   ToneMap       a grid of the whole scan coloured by result; hover with the
                 mouse (or move with the arrow keys / hjkl) and the cell's
                 address + verdict show at the bottom.
-  Hall of Fame  every carrier and tone found, with banners (F jumps here).
+  Hall of Fame  every carrier and tone found, selectable (j/k); ENTER opens its
+                service detail, B brutes it.
+  Services      every TCP/UDP service found; select (j/k), ENTER for the full
+                detail (connect banner, nerva fingerprint, brutus creds), B to
+                run brutus.
 
 In the web (--web) version the Speaker toggle (S) drives synthesized modem
 audio: dial tones, busy signals, and the handshake screech on a carrier.
