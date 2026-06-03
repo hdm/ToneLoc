@@ -222,7 +222,13 @@ async function makeTerminal(){
 let SID = null, WS = null, TERM = null, closed = false;
 
 // fitTerminal sizes the terminal to fill the window (more rows/cols, not a
-// scaled 80x25) and tells the server the new size so the UI re-lays-out.
+// scaled 80x25) and tells the server the terminal's ACTUAL grid so the server's
+// screen matches exactly (a mismatch causes scrolling / messy overdraw).
+function tellServerSize(){
+  if(!TERM || !WS || WS.readyState!==WebSocket.OPEN) return;
+  const cols = TERM.cols || 80, rows = TERM.rows || 25;
+  WS.send('\x1b]1339;'+cols+';'+rows+'\x07');
+}
 function fitTerminal(){
   if(!TERM) return;
   const availW = innerWidth * 0.96 - 64;   // minus bezel + term padding
@@ -230,7 +236,7 @@ function fitTerminal(){
   const cols = Math.max(80,  Math.min(240, Math.floor(availW / (FONTSZ*0.60))));
   const rows = Math.max(25,  Math.min(70,  Math.floor(availH / (FONTSZ*1.18))));
   try{ TERM.resize(cols, rows); }catch{}
-  if (WS && WS.readyState===WebSocket.OPEN) WS.send('\x1b]1339;'+cols+';'+rows+'\x07');
+  tellServerSize(); // send the terminal's resulting real grid
 }
 addEventListener('resize', fitTerminal);
 
@@ -241,6 +247,9 @@ addEventListener('resize', fitTerminal);
 
   const { term, kind } = await makeTerminal();
   TERM = term;
+  // If the terminal resizes itself (its own grid changed), tell the server the
+  // real size so the render never exceeds the visible grid.
+  try { term.onResize && term.onResize(()=>tellServerSize()); } catch {}
   fitTerminal(); requestAnimationFrame(fitTerminal); setTimeout(fitTerminal,150); setTimeout(fitTerminal,500);
 
   const proto = location.protocol==='https:' ? 'wss' : 'ws';

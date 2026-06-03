@@ -71,11 +71,16 @@ func (s *simTools) ScanUDP(ctx context.Context, addrs []netip.Addr, ports []uint
 		}
 		for _, p := range use {
 			key := "udp/" + a.String() + ":" + itoa(p)
-			if hashf(key, s.seed) < 0.25 { // a couple of UDP services on an up host
-				app := appForPort("udp", p)
-				emit(Service{Addr: a, IP: a.String(), Port: p, Proto: "udp",
-					App: app, Banner: s.banner(app, key), Brutable: bruteProtocol(app) != ""})
+			if hashf(key, s.seed) >= 0.25 {
+				continue
 			}
+			app := appForPort("udp", p)
+			banner := s.banner(app, key)
+			if banner == "" {
+				continue // only report UDP services that returned data
+			}
+			emit(Service{Addr: a, IP: a.String(), Port: p, Proto: "udp",
+				App: app, Banner: banner, Brutable: bruteProtocol(app) != ""})
 		}
 	}
 }

@@ -38,6 +38,13 @@ func (a *App) drawServices(v engine.StateView) {
 		a.svcSel = 0
 	}
 
+	// Full-screen detail: a clean centered modal on a cleared background (no
+	// list behind it, so nothing bleeds through).
+	if a.svcDetail {
+		a.drawServiceDetail(svcs[a.svcSel])
+		return
+	}
+
 	// Scrolling list.
 	top, rows := 2, a.lStatRow-3
 	if a.svcSel < a.svcScroll {
@@ -64,12 +71,6 @@ func (a *App) drawServices(v engine.StateView) {
 		fg := svcColor(sv)
 		y := top + i
 		s.Print(1, y, dos.Attr(fg, bg), dos.Pad((map[bool]string{true: "►", false: " "}[sel])+" "+sv.Label(), a.scr.W-2))
-	}
-
-	// The detail is a centered modal floating over the list.
-	if a.svcDetail {
-		a.drawServiceDetail(svcs[a.svcSel])
-		return
 	}
 	a.svcHints()
 }
