@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
@@ -42,6 +43,9 @@ type Engine struct {
 	sessionID string          // resumable session log id
 	nervaOn   bool            // nerva UDP discovery + fingerprinting enabled
 	brutusOn  bool            // brutus credential testing enabled
+
+	bruteMu      sync.Mutex                    // guards bruteCancels
+	bruteCancels map[string]context.CancelFunc // per-service brute cancellers
 }
 
 func onOff(b bool) string {

@@ -12,6 +12,7 @@ import (
 // to launch brutus against it. Compromised services glow.
 func (a *App) drawServices(v engine.StateView) {
 	s := a.scr
+	s.Clear(dos.Attr(dos.LightGray, dos.Black))
 	svcs := a.eng.State().ServicesSnapshot()
 
 	comp := 0
@@ -35,12 +36,6 @@ func (a *App) drawServices(v engine.StateView) {
 	}
 	if a.svcSel < 0 {
 		a.svcSel = 0
-	}
-
-	if a.svcDetail {
-		a.drawServiceDetail(svcs[a.svcSel])
-		a.svcHints()
-		return
 	}
 
 	// Scrolling list.
@@ -70,75 +65,107 @@ func (a *App) drawServices(v engine.StateView) {
 		y := top + i
 		s.Print(1, y, dos.Attr(fg, bg), dos.Pad((map[bool]string{true: "►", false: " "}[sel])+" "+sv.Label(), a.scr.W-2))
 	}
+
+	// The detail is a centered modal floating over the list.
+	if a.svcDetail {
+		a.drawServiceDetail(svcs[a.svcSel])
+		return
+	}
 	a.svcHints()
 }
 
 func (a *App) drawServiceDetail(sv engine.Service) {
 	s := a.scr
-	s.Box(2, 2, a.scr.W-4, a.lStatRow-3, dos.Attr(svcColor(sv), dos.Black), true)
-	s.Title(2, 2, a.scr.W-4, dos.Attr(dos.White, dos.Black), sv.Target())
-	x, y := 5, 4
+	ix, iy, iw, ih := a.drawModal(sv.Proto+" "+sv.Target(), svcColor(sv))
+	x, y := ix, iy
+	maxY := iy + ih - 2
 	row := func(label, val string, c int) {
+		if y > maxY {
+			return
+		}
 		s.Print(x, y, dos.Attr(dos.Yellow, dos.Black), label)
-		s.Print(x+len([]rune(label)), y, dos.Attr(c, dos.Black), val)
+		s.Print(x+len([]rune(label)), y, dos.Attr(c, dos.Black), trunc(val, iw-len([]rune(label))))
 		y++
 	}
-	row("target      : ", sv.Target(), dos.White)
-	row("transport   : ", sv.Proto, dos.White)
-	w := a.scr.W - 22
-
-	// connect / zmap result.
-	s.Print(x, y, dos.Attr(dos.Brown, dos.Black), "── connect ──")
-	y++
-	if sv.ConnectBanner != "" {
-		row("  banner   : ", trunc(sv.ConnectBanner, w), dos.LightGreen)
-	} else {
-		row("  banner   : ", "(open; no banner)", dos.DarkGray)
+	section := func(name string) {
+		if y > maxY {
+			return
+		}
+		s.Print(x, y, dos.Attr(dos.LightCyan, dos.Black), "── "+name+" "+repeat("─", iw-len([]rune(name))-4))
+		y++
 	}
 
-	// nerva fingerprint.
-	s.Print(x, y, dos.Attr(dos.Brown, dos.Black), "── nerva ──")
-	y++
-	row("  app      : ", sv.App, dos.LightCyan)
+	section("connect")
+	if sv.ConnectBanner != "" {
+		row("  banner  : ", sv.ConnectBanner, dos.LightGreen)
+	} else {
+		row("  result  : ", "open (no banner grabbed)", dos.DarkGray)
+	}
+
+	section("nerva")
+	row("  app     : ", sv.App, dos.LightCyan)
 	if sv.Version != "" {
-		row("  version  : ", sv.Version, dos.White)
+		row("  version : ", sv.Version, dos.White)
 	}
 	if sv.Banner != "" {
-		row("  banner   : ", trunc(sv.Banner, w), dos.LightGreen)
+		row("  banner  : ", sv.Banner, dos.LightGreen)
 	}
 
-	// brutus credential testing.
-	s.Print(x, y, dos.Attr(dos.Brown, dos.Black), "── brutus ──")
-	y++
+	section("brutus")
 	bs := sv.Brute
 	bc := map[engine.BruteState]int{engine.BruteRunning: dos.Yellow, engine.BruteDone: dos.LightGreen, engine.BruteFailed: dos.LightRed}[bs]
 	if bc == 0 {
 		bc = dos.LightGray
 	}
-	row("  state    : ", bs.String()+fmt.Sprintf("   (%d creds tried)", sv.Tried), bc)
-	if sv.Compromised {
-		s.Print(x+2, y, dos.Attr(dos.LightGreen|dos.Blink, dos.Black), "*** COMPROMISED ***")
+	row("  state   : ", bs.String(), bc)
+	if bs == engine.BruteRunning {
+		// live progress meter.
+		s.Print(x, y, dos.Attr(dos.Yellow, dos.Black), fmt.Sprintf("  testing : %d creds", sv.Tried))
+		y++
+		s.Meter(x+2, y, iw-6, float64(sv.Tried%108)/108.0, dos.Yellow, dos.DarkGray, dos.Black)
+		y++
+	}
+	switch {
+	case sv.Compromised:
+		blink := dos.LightGreen
+		if a.blink {
+			blink = dos.LightGreen | dos.Blink
+		}
+		s.Print(x+2, y, dos.Attr(blink, dos.Black), "*** COMPROMISED ***")
 		y++
 		for _, c := range sv.Creds {
-			s.Print(x+4, y, dos.Attr(dos.LightGreen, dos.Black), "✓ "+c.String())
-			y++
+			row("    creds : ", c.String(), dos.LightGreen)
 		}
-	} else if !sv.Brutable {
-		s.Print(x+2, y, dos.Attr(dos.DarkGray, dos.Black), "no brutus plugin for "+sv.App)
-	} else if !a.eng.BrutusEnabled() {
-		s.Print(x+2, y, dos.Attr(dos.DarkGray, dos.Black), "brutus disabled -- restart with --brutus to enable")
-	} else if bs == engine.BruteIdle {
-		s.Print(x+2, y, dos.Attr(dos.LightMagenta, dos.Black), "press B to run brutus against this service")
-	} else if bs == engine.BruteRunning {
-		s.Print(x+2, y, dos.Attr(dos.Yellow, dos.Black), "brutus is testing credentials...")
-	} else if bs == engine.BruteDone {
-		s.Print(x+2, y, dos.Attr(dos.LightGray, dos.Black), "brutus finished -- no valid credentials")
+	case !sv.Brutable:
+		row("  note    : ", "no brutus plugin for "+sv.App, dos.DarkGray)
+	case !a.eng.BrutusEnabled():
+		row("  note    : ", "brutus disabled (restart with --brutus)", dos.DarkGray)
+	case bs == engine.BruteDone:
+		row("  note    : ", "no valid credentials", dos.LightGray)
 	}
+
+	// Modal footer hints, inside the box.
+	hint := " ENTER/ESC close   B brute   X cancel "
+	if bs == engine.BruteRunning {
+		hint = " X cancel brute   ENTER/ESC close "
+	}
+	s.Print(x+(iw-len([]rune(hint)))/2, iy+ih-1, dos.Attr(dos.Black, dos.LightGray), hint)
+}
+
+func repeat(s string, n int) string {
+	if n <= 0 {
+		return ""
+	}
+	out := make([]rune, n)
+	for i := range out {
+		out[i] = []rune(s)[0]
+	}
+	return string(out)
 }
 
 func (a *App) svcHints() {
 	a.scr.Print(0, a.lStatRow, dos.Attr(dos.Black, dos.LightGray),
-		dos.Pad(" M/TAB:next view   j/k or arrows:select   ENTER:detail   B:brute   ESC:quit", a.scr.W))
+		dos.Pad(" M/TAB:next view   j/k or arrows:select   ENTER:detail   B:brute   X:cancel   ESC:quit", a.scr.W))
 }
 
 func svcColor(sv engine.Service) int {

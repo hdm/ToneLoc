@@ -51,17 +51,16 @@ func (nervaLib) ScanUDP(ctx context.Context, addrs []netip.Addr, ports []uint16,
 		return
 	}
 	for _, svc := range results {
-		if svc.Transport != "udp" {
+		// Only count UDP services nerva actually identified -- a bare "open|
+		// filtered" with no protocol is almost always a false positive (e.g.
+		// SNMP appearing on every dead IP), so skip those.
+		if svc.Transport != "udp" || svc.Protocol == "" {
 			continue
 		}
 		addr, _ := netip.ParseAddr(svc.IP)
-		app := svc.Protocol
-		if app == "" {
-			app = appForPort("udp", uint16(svc.Port))
-		}
 		emit(Service{Addr: addr, IP: svc.IP, Port: uint16(svc.Port), Proto: "udp",
-			App: app, Version: svc.Version, Banner: rawBanner(svc.Raw),
-			Brutable: bruteProtocol(app) != ""})
+			App: svc.Protocol, Version: svc.Version, Banner: rawBanner(svc.Raw),
+			Brutable: bruteProtocol(svc.Protocol) != ""})
 	}
 }
 

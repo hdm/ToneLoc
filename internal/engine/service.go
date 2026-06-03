@@ -114,5 +114,26 @@ var brutableApps = map[string]string{
 }
 
 // bruteProtocol maps a fingerprinted app to the brutus --protocol value, or ""
-// if brutus does not support it.
-func bruteProtocol(app string) string { return brutableApps[strings.ToLower(app)] }
+// if brutus does not support it. nerva sometimes returns decorated names
+// (e.g. "ssh-2.0", "http/1.1"), so fall back to a substring match.
+func bruteProtocol(app string) string {
+	a := strings.ToLower(strings.TrimSpace(app))
+	if p, ok := brutableApps[a]; ok {
+		return p
+	}
+	// Prefix match for decorated names ("ssh-2.0", "http/1.1", "postgresql"),
+	// but NOT arbitrary substrings (so "tftp" doesn't match "ftp").
+	for k, p := range brutableApps {
+		if strings.HasPrefix(a, k) {
+			return p
+		}
+	}
+	return ""
+}
+
+// brutableFor reports whether a service on the given proto/port is brutable,
+// preferring the fingerprinted app but falling back to the well-known port so a
+// missed/odd nerva fingerprint doesn't hide a brutable service (e.g. SSH).
+func brutableFor(app, proto string, port uint16) bool {
+	return bruteProtocol(app) != "" || bruteProtocol(appForPort(proto, port)) != ""
+}

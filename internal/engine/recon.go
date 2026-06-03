@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"net/netip"
 )
 
@@ -12,7 +13,7 @@ func (e *Engine) onOpenTCP(res Result) {
 	// res.Banner is what connect/zmap grabbed; nerva (below) may overwrite App
 	// and add its own banner/version.
 	svc := &Service{Addr: res.Addr, Port: res.Port, Proto: "tcp", App: app, ConnectBanner: res.Banner}
-	svc.Brutable = bruteProtocol(app) != ""
+	svc.Brutable = brutableFor(app, "tcp", res.Port)
 	s, created := e.state.upsertService(svc)
 	if created && e.nervaOn {
 		go e.fingerprint(s.Key(), res.Addr.String(), res.Port)
@@ -34,7 +35,7 @@ func (e *Engine) fingerprint(key, ip string, port uint16) {
 			s.Banner = fp.Banner
 		}
 		s.Version = fp.Version
-		s.Brutable = bruteProtocol(s.App) != ""
+		s.Brutable = brutableFor(s.App, s.Proto, s.Port)
 	})
 	v := fp.Version
 	if v != "" {
@@ -98,24 +99,43 @@ func (e *Engine) StartBrute(key string) {
 	if !start {
 		return
 	}
+	ctx, cancel := context.WithCancel(e.bgCtx)
+	e.bruteMu.Lock()
+	if e.bruteCancels == nil {
+		e.bruteCancels = map[string]context.CancelFunc{}
+	}
+	e.bruteCancels[key] = cancel
+	e.bruteMu.Unlock()
+
 	go func() {
 		e.state.updateService(key, func(s *Service) { s.Brute = BruteRunning })
 		e.logf("brutus: testing %s creds on %s ...", svc.App, svc.Target())
-		creds, err := e.toolkit.Brute.Brute(e.bgCtx, svc, func(tried int) {
+		creds, err := e.toolkit.Brute.Brute(ctx, svc, func(tried int) {
 			e.state.updateService(key, func(s *Service) { s.Tried = tried })
 		})
+		cancelled := errors.Is(err, context.Canceled)
+		e.bruteMu.Lock()
+		delete(e.bruteCancels, key)
+		e.bruteMu.Unlock()
+		cancel()
+
 		e.state.updateService(key, func(s *Service) {
-			if err != nil {
+			switch {
+			case cancelled:
+				s.Brute = BruteIdle // cancelled -> back to idle, retriable
+			case err != nil:
 				s.Brute = BruteFailed
-				return
+			default:
+				s.Brute = BruteDone
+				s.Creds = creds
+				s.Compromised = len(creds) > 0
 			}
-			s.Brute = BruteDone
-			s.Creds = creds
-			s.Compromised = len(creds) > 0
 		})
 		switch {
+		case cancelled:
+			e.logf("brutus: cancelled on %s (after %d creds)", svc.Target(), svc.Tried)
 		case err != nil:
-			e.logf("brutus: %s aborted on %s", svc.App, svc.Target())
+			e.logf("brutus: %s errored on %s", svc.App, svc.Target())
 		case len(creds) > 0:
 			e.logf("brutus: ** %s COMPROMISED ** %s @ %s", svc.App, creds[0].String(), svc.Target())
 		default:
@@ -123,4 +143,15 @@ func (e *Engine) StartBrute(key string) {
 		}
 		e.saveSession() // persist brute outcome even after the scan loop ends
 	}()
+}
+
+// CancelBrute stops an in-progress brute against a service (the X key).
+func (e *Engine) CancelBrute(key string) {
+	e.bruteMu.Lock()
+	cancel := e.bruteCancels[key]
+	delete(e.bruteCancels, key)
+	e.bruteMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 }

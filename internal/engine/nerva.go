@@ -64,9 +64,14 @@ func (s *simTools) ScanUDP(ctx context.Context, addrs []netip.Addr, ports []uint
 			return
 		default:
 		}
+		// Only a minority of hosts are "up" for UDP -- otherwise (e.g.) SNMP
+		// would appear to answer on every dead address.
+		if hashf("udp-up/"+a.String(), s.seed) >= 0.15 {
+			continue
+		}
 		for _, p := range use {
 			key := "udp/" + a.String() + ":" + itoa(p)
-			if hashf(key, s.seed) < 0.04 { // ~4% of UDP probes answer
+			if hashf(key, s.seed) < 0.25 { // a couple of UDP services on an up host
 				app := appForPort("udp", p)
 				emit(Service{Addr: a, IP: a.String(), Port: p, Proto: "udp",
 					App: app, Banner: s.banner(app, key), Brutable: bruteProtocol(app) != ""})

@@ -195,11 +195,14 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 				return nil
 			}
 		case <-ticker.C:
-			// A lone ESC (not the start of an arrow/mouse sequence) means quit.
+			// A lone ESC (not the start of an arrow/mouse sequence): close an open
+			// dialog, or quit if there's nothing to close.
 			if a.escState == 1 && time.Since(a.escTime) > 80*time.Millisecond {
 				a.escState = 0
-				a.eng.Quit()
-				return nil
+				if a.onEscape() {
+					a.eng.Quit()
+					return nil
+				}
 			}
 			if w, h, ok := a.takeResize(); ok {
 				a.SetSize(w, h)
@@ -238,7 +241,7 @@ func (a *App) feed(b byte) bool {
 			return false
 		}
 		a.escState = 0
-		return true // ESC followed by a normal key -> treat as quit
+		return a.onEscape() // ESC + normal key: close a dialog, else quit
 	default:
 		if b == 0x1b {
 			a.escState = 1
@@ -305,6 +308,8 @@ func (a *App) handleNormal(b byte) bool {
 			a.svcDetail = !a.svcDetail
 		case 'b', 'B': // launch brutus against the selected service
 			a.bruteSelected()
+		case 'x', 'X': // cancel an in-progress brute
+			a.cancelSelected()
 		}
 		return false
 	}
@@ -332,6 +337,10 @@ func (a *App) handleNormal(b byte) bool {
 			a.openHitDetail()
 		case 'b', 'B':
 			a.bruteHit()
+		case 'x', 'X':
+			if sv, ok := a.hitService(); ok {
+				a.eng.CancelBrute(sv.Key())
+			}
 		}
 		return false
 	}
@@ -372,6 +381,51 @@ func (a *App) handleNormal(b byte) bool {
 func (a *App) setMode(m viewMode) {
 	a.mode = m
 	a.enableMouse(m == modeToneMap)
+}
+
+// drawModal draws a centered dialog box with margins and a drop shadow over the
+// current screen, returning the inner content rectangle.
+func (a *App) drawModal(title string, frame int) (ix, iy, iw, ih int) {
+	s := a.scr
+	mx := a.scr.W / 8
+	if mx < 4 {
+		mx = 4
+	}
+	my := a.scr.H / 8
+	if my < 2 {
+		my = 2
+	}
+	bx, by := mx, my
+	bw, bh := a.scr.W-2*mx, a.scr.H-2*my
+	// Drop shadow (down-right) for depth.
+	for y := by + 1; y <= by+bh && y < a.scr.H; y++ {
+		s.Set(bx+bw, y, ' ', dos.Attr(dos.Black, dos.DarkGray))
+	}
+	for x := bx + 1; x <= bx+bw && x < a.scr.W; x++ {
+		s.Set(x, by+bh, ' ', dos.Attr(dos.Black, dos.DarkGray))
+	}
+	s.Fill(bx, by, bw, bh, ' ', dos.Attr(dos.LightGray, dos.Black))
+	s.Box(bx, by, bw, bh, dos.Attr(frame, dos.Black), true)
+	s.Print(bx+(bw-len([]rune(title))-2)/2, by, dos.Attr(dos.White, dos.Black), " "+title+" ")
+	return bx + 3, by + 2, bw - 6, bh - 4
+}
+
+// onEscape handles ESC: it closes an open dialog (the service detail) and
+// returns false; if nothing is open it returns true, meaning "quit".
+func (a *App) onEscape() bool {
+	if a.mode == modeServices && a.svcDetail {
+		a.svcDetail = false
+		return false
+	}
+	return true
+}
+
+// cancelSelected cancels an in-progress brute on the highlighted service.
+func (a *App) cancelSelected() {
+	svcs := a.eng.State().ServicesSnapshot()
+	if a.svcSel >= 0 && a.svcSel < len(svcs) {
+		a.eng.CancelBrute(svcs[a.svcSel].Key())
+	}
 }
 
 // bruteSelected launches brutus against the highlighted service.
