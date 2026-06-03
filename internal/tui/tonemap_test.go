@@ -74,18 +74,36 @@ func TestModeToggleAndEscQuit(t *testing.T) {
 		t.Fatal("TAB should cycle back to dialer")
 	}
 
-	// An arrow key must NOT be read as a quit, but a lone ESC byte (followed by
-	// a non-'[' byte) should.
-	if quit := app.feed(0x1b); quit {
-		t.Fatal("ESC alone should defer, not quit immediately")
-	}
+	// An arrow key must NOT be read as a quit, and a CSI sequence is not a quit.
 	if quit := app.feed('['); quit {
 		t.Fatal("ESC[ should begin a CSI, not quit")
 	}
 	if quit := app.feed('C'); quit { // right arrow
 		t.Fatal("arrow key should not quit")
 	}
-	if quit := app.feed('q'); !quit {
-		t.Fatal("q should quit")
+
+	// Quit now requires confirmation: 'q' opens the prompt (no quit yet).
+	if quit := app.feed('q'); quit {
+		t.Fatal("q should open the confirm prompt, not quit immediately")
+	}
+	if !app.confirmQuit {
+		t.Fatal("q should set confirmQuit")
+	}
+	if quit := app.feed('c'); quit || app.confirmQuit {
+		t.Fatal("c should cancel the quit prompt")
+	}
+	// ESC opens the prompt; a second ESC cancels it (double-ESC = cancel).
+	app.onEscape()
+	if !app.confirmQuit {
+		t.Fatal("ESC should open the quit prompt")
+	}
+	app.onEscape()
+	if app.confirmQuit {
+		t.Fatal("a second ESC should cancel the quit prompt")
+	}
+	// Confirm with Y actually quits.
+	app.onEscape() // open prompt
+	if quit := app.feed('y'); !quit {
+		t.Fatal("Y should confirm quit")
 	}
 }

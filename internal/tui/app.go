@@ -68,6 +68,9 @@ type App struct {
 	splashUntil time.Time
 	splashDone  bool
 
+	// confirmQuit is true while the "are you sure?" exit dialog is showing.
+	confirmQuit bool
+
 	// Sound-cue edge detection (the web view turns these into modem audio).
 	prevCarriers, prevTones, prevBusy int
 	prevTarget                        string
@@ -290,9 +293,21 @@ func (a *App) handleMouse(buf []byte) {
 
 // handleNormal maps a plain keystroke to an action. Returns true to quit.
 func (a *App) handleNormal(b byte) bool {
+	// While the quit-confirmation dialog is up, only Y/ENTER (quit) or C/N
+	// (cancel) do anything; everything else is swallowed.
+	if a.confirmQuit {
+		switch b {
+		case 'y', 'Y', '\r', '\n':
+			return true // confirmed -> quit
+		case 'c', 'C', 'n', 'N':
+			a.confirmQuit = false
+		}
+		return false
+	}
 	switch b {
-	case 'q', 'Q': // explicit quit
-		return true
+	case 'q', 'Q': // explicit quit -> ask for confirmation too
+		a.confirmQuit = true
+		return false
 	case 'm', 'M', '\t': // cycle Dialer -> ToneMap -> Hall of Fame -> Services
 		a.setMode((a.mode + 1) % modeCount)
 		return false
@@ -410,14 +425,19 @@ func (a *App) drawModal(title string, frame int) (ix, iy, iw, ih int) {
 	return bx + 3, by + 2, bw - 6, bh - 4
 }
 
-// onEscape handles ESC: it closes an open dialog (the service detail) and
-// returns false; if nothing is open it returns true, meaning "quit".
+// onEscape handles ESC. It never quits directly: it closes an open detail, or
+// toggles the quit-confirmation dialog (so a second ESC cancels it). Actually
+// quitting requires confirming with Y/ENTER. Always returns false.
 func (a *App) onEscape() bool {
-	if a.mode == modeServices && a.svcDetail {
+	switch {
+	case a.mode == modeServices && a.svcDetail:
 		a.svcDetail = false
-		return false
+	case a.confirmQuit:
+		a.confirmQuit = false // a second ESC cancels the quit prompt
+	default:
+		a.confirmQuit = true // first ESC asks "are you sure?"
 	}
-	return true
+	return false
 }
 
 // cancelSelected cancels an in-progress brute on the highlighted service.
@@ -586,30 +606,53 @@ func (a *App) FrameSVG() string {
 func (a *App) draw(v engine.StateView) {
 	a.blink = (a.frame/10)%2 == 0
 	a.emitCues(v)
-	if a.inSplash() {
+	switch {
+	case a.inSplash():
 		a.drawSplash()
-		return
-	}
-	if a.mode == modeToneMap {
+	case a.mode == modeToneMap:
 		a.drawToneMap(v)
-		return
-	}
-	if a.mode == modeHallOfFame {
+	case a.mode == modeHallOfFame:
 		a.drawHallOfFame(v)
-		return
-	}
-	if a.mode == modeServices {
+	case a.mode == modeServices:
 		a.drawServices(v)
-		return
+	default:
+		s := a.scr
+		s.Clear(dos.Attr(dos.LightGray, dos.Black))
+		a.drawActivity(v)
+		a.drawModem(v)
+		a.drawStats(v)
+		a.drawMeter(v)
+		a.drawChrome(v)
 	}
-	s := a.scr
-	s.Clear(dos.Attr(dos.LightGray, dos.Black))
+	if a.confirmQuit && !a.inSplash() {
+		a.drawQuitConfirm()
+	}
+}
 
-	a.drawActivity(v)
-	a.drawModem(v)
-	a.drawStats(v)
-	a.drawMeter(v)
-	a.drawChrome(v)
+// drawQuitConfirm overlays a small centered "are you sure?" dialog.
+func (a *App) drawQuitConfirm() {
+	s := a.scr
+	w, h := 44, 6
+	x, y := (a.scr.W-w)/2, (a.scr.H-h)/2
+	// shadow + box
+	for yy := y + 1; yy <= y+h && yy < a.scr.H; yy++ {
+		s.Set(x+w, yy, ' ', dos.Attr(dos.Black, dos.DarkGray))
+	}
+	for xx := x + 1; xx <= x+w && xx < a.scr.W; xx++ {
+		s.Set(xx, y+h, ' ', dos.Attr(dos.Black, dos.DarkGray))
+	}
+	s.Fill(x, y, w, h, ' ', dos.Attr(dos.LightGray, dos.Black))
+	s.Box(x, y, w, h, dos.Attr(dos.LightRed, dos.Black), true)
+	title := " Quit ToneLoc? "
+	s.Print(x+(w-len([]rune(title)))/2, y, dos.Attr(dos.White, dos.Black), title)
+	msg := "Really exit and end this scan?"
+	s.Print(x+(w-len([]rune(msg)))/2, y+2, dos.Attr(dos.LightGray, dos.Black), msg)
+	opt := "[ Y / ENTER ] quit     [ ESC / C ] cancel"
+	c := dos.LightCyan
+	if a.blink {
+		c = dos.White
+	}
+	s.Print(x+(w-len([]rune(opt)))/2, y+4, dos.Attr(c, dos.Black), opt)
 }
 
 func (a *App) drawActivity(v engine.StateView) {
