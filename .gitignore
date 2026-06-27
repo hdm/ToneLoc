@@ -1,0 +1,23 @@
+# Go port build artifacts
+/toneloc
+/toneloc-zmap
+*.out
+
+# runtime scan artifacts
+toneloc-*.session
+toneloc-*.session.*
+/LOCALNET.DAT
+/toneloc-acme/
+
+# game scan artifacts
+TONESTORM.DAT
+TONESTORM.DAT.tmp
+NETRUN.DAT
+
+# DARKCIDR binaries + generated scan artifacts (tracked SAMPLE*.DAT are unaffected)
+/darkcidr
+/darkcidr-seed
+*.DAT
+*.DAT.tmp
+*.session
+*.high
