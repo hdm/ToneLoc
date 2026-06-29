@@ -16,6 +16,7 @@ import (
 
 	"github.com/hdm/toneloc/internal/dos"
 	"github.com/hdm/toneloc/internal/engine"
+	"github.com/hdm/toneloc/internal/game"
 )
 
 // minW/minH are the smallest grid we lay out for; smaller terminals still work
@@ -44,19 +45,19 @@ type App struct {
 	mode    viewMode
 	mouseOn bool
 
-	// Map cursor (grid cell 0..15 per /24) and per-IP verdict cache.
-	curCol, curRow int
-	mapCells       []uint8
-	mapPerCell     int
-	mapAt          time.Time
-	mapAllNets     bool             // true = all-subnets overview, false = one /24
-	mapSubnet      int              // index into mapSubnets (which /24 is shown)
-	mapVerdicts    map[string]uint8 // IP -> best Response, refreshed on a timer
-	mapSubnets     []string         // sorted "a.b.c" /24 prefixes seen
+	// The full-screen zoomable network map (its own state + input).
+	tm *toneMap
+	// The full-screen scrollable per-host bars view (default mode).
+	hv *hostsView
 
-	// Hall of Fame selection + scroll.
-	hofSel    int
-	hofScroll int
+	// enterGameReq is set when the player presses G; the Run loop then drops into
+	// the war-dialing game (built from the live scan) without stopping the scan.
+	enterGameReq bool
+	gameDiff     game.Difficulty
+
+	// transient on-screen toast (e.g. "no services yet").
+	toast      string
+	toastUntil time.Time
 
 	// Services view selection/scroll/detail.
 	svcSel    int
@@ -106,20 +107,24 @@ func (a *App) takeResize() (w, h int, ok bool) {
 type viewMode int
 
 const (
-	modeDialer viewMode = iota
+	modeHosts viewMode = iota // default: full-screen scrollable per-host bars
 	modeToneMap
-	modeHallOfFame
-	modeServices
+	modeServices // the trophy case: every carrier/tone/service found, one place
+	modeDialer   // the classic 3-window DOS dialer (kept for nostalgia)
 	modeCount
 )
 
 // New builds an App that draws to out at the default 80x25; call SetSize to
 // grow it to the real terminal.
 func New(eng *engine.Engine, out io.Writer) *App {
-	a := &App{eng: eng, out: out}
+	a := &App{eng: eng, out: out, tm: newToneMap(), hv: newHostsView(),
+		gameDiff: game.DifficultyByName("normal")}
 	a.SetSize(minW, minH)
 	return a
 }
+
+// SetGameDifficulty sets the difficulty used when dropping into the game with G.
+func (a *App) SetGameDifficulty(d game.Difficulty) { a.gameDiff = d }
 
 // SetSize resizes the screen and recomputes the layout for w x h cells (e.g.
 // from the terminal size or a browser resize). Sizes below the 80x25 floor are
@@ -162,10 +167,6 @@ func (a *App) relayout(w, h int) {
 	a.lStX, a.lStY, a.lStW = a.lActW, a.lModH, right
 	a.lStH = (h - 3) - a.lModH
 	a.lMeterRow, a.lCopyRow, a.lStatRow = h-3, h-2, h-1
-	a.lTmGX, a.lTmGY = 1, 2
-	a.lTmLegendX = w - 23
-	a.lTmGW = a.lTmLegendX - 2
-	a.lTmGH = h - 5
 }
 
 // Run renders at ~20fps and dispatches input keys until the engine is done or
@@ -200,6 +201,10 @@ func (a *App) Run(ctx context.Context, keys <-chan byte) error {
 			if a.feed(b) {
 				a.eng.Quit()
 				return nil
+			}
+			if a.enterGameReq {
+				a.enterGameReq = false
+				a.runGame(ctx, keys)
 			}
 		case <-ticker.C:
 			// A lone ESC (not the start of an arrow/mouse sequence): close an open
@@ -274,6 +279,16 @@ func (a *App) dispatchCSI(buf []byte) {
 		}
 		return
 	}
+	// Page keys (ESC[5~ PgUp, ESC[6~ PgDn) scroll the hosts list a page at a time.
+	if a.mode == modeHosts && len(buf) >= 2 && buf[len(buf)-1] == '~' {
+		switch string(buf[:len(buf)-1]) {
+		case "5":
+			a.hv.page(-1)
+		case "6":
+			a.hv.page(1)
+		}
+		return
+	}
 	if buf[0] == '<' { // SGR mouse: <btn;col;row(M|m)
 		a.handleMouse(buf)
 	}
@@ -286,13 +301,25 @@ func (a *App) handleMouse(buf []byte) {
 	if len(parts) != 3 {
 		return
 	}
+	btn, e0 := strconv.Atoi(parts[0])
 	col, e1 := strconv.Atoi(parts[1])
 	row, e2 := strconv.Atoi(parts[2])
-	if e1 != nil || e2 != nil {
+	if e0 != nil || e1 != nil || e2 != nil {
 		return
 	}
-	// Terminal coords are 1-based; map onto the ToneMap grid.
-	a.hoverAt(col-1, row-1)
+	if a.mode != modeToneMap {
+		return
+	}
+	// SGR wheel buttons are 64 (up) / 65 (down); everything else is a move/drag
+	// over the map grid. Terminal coords are 1-based.
+	wheel := 0
+	switch btn & 0x43 {
+	case 64:
+		wheel = 1
+	case 65:
+		wheel = -1
+	}
+	a.tm.mouse(col-1, row-1, wheel)
 }
 
 // handleNormal maps a plain keystroke to an action. Returns true to quit.
@@ -312,8 +339,45 @@ func (a *App) handleNormal(b byte) bool {
 	case 'q', 'Q': // explicit quit -> ask for confirmation too
 		a.confirmQuit = true
 		return false
-	case 'm', 'M', '\t': // cycle Dialer -> ToneMap -> Hall of Fame -> Services
+	case 'm', 'M', '\t': // cycle Hosts -> Map -> Services -> Hall -> Dialer
 		a.setMode((a.mode + 1) % modeCount)
+		return false
+	case '1':
+		a.setMode(modeHosts)
+		return false
+	case '2':
+		a.setMode(modeToneMap)
+		return false
+	case '3':
+		a.setMode(modeServices)
+		return false
+	case '4':
+		a.setMode(modeDialer)
+		return false
+	case 'G': // drop into the war-dialing game, built from the live scan
+		if a.mode != modeDialer { // in the classic Dialer, G is the "Girl" note
+			a.enterGameReq = true
+			return false
+		}
+	}
+
+	if a.mode == modeHosts {
+		switch b {
+		case 'k':
+			a.hv.move(-1)
+		case 'j':
+			a.hv.move(1)
+		case 'g':
+			a.hv.home()
+		case 'e', 'E':
+			a.hv.end()
+		case 'f', 'F':
+			a.hv.follow = !a.hv.follow
+		case '\r', '\n': // open the selected host's service detail
+			a.openHostDetail()
+		case 'b', 'B': // brute the host's first brutable service
+			a.bruteHost()
+		}
 		return false
 	}
 
@@ -336,47 +400,15 @@ func (a *App) handleNormal(b byte) bool {
 	if a.mode == modeToneMap {
 		switch b {
 		case 'h':
-			a.moveCursor(-1, 0)
+			a.tm.arrow(-1, 0)
 		case 'l':
-			a.moveCursor(1, 0)
+			a.tm.arrow(1, 0)
 		case 'k':
-			a.moveCursor(0, -1)
+			a.tm.arrow(0, -1)
 		case 'j':
-			a.moveCursor(0, 1)
-		case 'a', 'A': // toggle all-networks overview vs single /24
-			a.mapAllNets = !a.mapAllNets
-			a.curCol, a.curRow = 0, 0
-		case 'n', ']': // next subnet
-			if len(a.mapSubnets) > 0 {
-				a.mapSubnet = (a.mapSubnet + 1) % len(a.mapSubnets)
-			}
-		case 'p', '[': // previous subnet
-			if len(a.mapSubnets) > 0 {
-				a.mapSubnet = (a.mapSubnet - 1 + len(a.mapSubnets)) % len(a.mapSubnets)
-			}
-		case '\r', '\n': // in the overview, ENTER drills into the selected /24
-			if a.mapAllNets && a.curRow < len(a.mapSubnets) {
-				a.mapSubnet = a.curRow
-				a.mapAllNets = false
-				a.curCol, a.curRow = 0, 0
-			}
-		}
-		return false
-	}
-	if a.mode == modeHallOfFame {
-		switch b {
-		case 'k':
-			a.moveCursor(0, -1)
-		case 'j':
-			a.moveCursor(0, 1)
-		case '\r', '\n': // jump to the selected hit's full service detail
-			a.openHitDetail()
-		case 'b', 'B':
-			a.bruteHit()
-		case 'x', 'X':
-			if sv, ok := a.hitService(); ok {
-				a.eng.CancelBrute(sv.Key())
-			}
+			a.tm.arrow(0, 1)
+		default:
+			a.tm.key(b) // +/- zoom, a fit, p panel, ENTER drill-in
 		}
 		return false
 	}
@@ -417,6 +449,59 @@ func (a *App) handleNormal(b byte) bool {
 func (a *App) setMode(m viewMode) {
 	a.mode = m
 	a.enableMouse(m == modeToneMap)
+}
+
+// modeTab is one entry in the top navigation bar.
+type modeTab struct {
+	m     viewMode
+	key   string
+	label string
+}
+
+var modeTabs = []modeTab{
+	{modeHosts, "1", "HOSTS"},
+	{modeToneMap, "2", "MAP"},
+	{modeServices, "3", "SVCS"},
+	{modeDialer, "4", "DIAL"},
+}
+
+// drawModeBar renders the global navigation bar on row 0: the brand, the mode
+// tabs (active one highlighted), the "G GAME" jump, and a right-aligned,
+// view-specific status string. Direct keys 1-5 jump straight to a view; G drops
+// into the game. The same bar tops every full-screen view, so you always know
+// where you are and how to move.
+func (a *App) drawModeBar(current viewMode, right string) {
+	s := a.scr
+	W := s.W
+	bar := dos.Blue
+	s.Fill(0, 0, W, 1, ' ', dos.Attr(dos.LightGray, bar))
+	x := 0
+	put := func(str string, fg, bg int) {
+		s.Print(x, 0, dos.Attr(fg, bg), str)
+		x += len([]rune(str))
+	}
+	put(" DARKCIDR ", dos.White, bar)
+	for _, t := range modeTabs {
+		put(" ", dos.LightGray, bar)
+		if t.m == current {
+			seg := " " + t.key + " " + t.label + " "
+			s.Print(x, 0, dos.Attr(dos.Black, dos.LightCyan), seg)
+			x += len([]rune(seg))
+		} else {
+			put(t.key, dos.Yellow, bar)
+			put(" "+t.label, dos.LightGray, bar)
+		}
+	}
+	put("  ", dos.LightGray, bar)
+	put("G", dos.LightMagenta, bar)
+	put(" GAME", dos.LightMagenta, bar)
+	if right != "" {
+		if rx := W - len([]rune(right)) - 1; rx > x+1 {
+			s.Print(rx, 0, dos.Attr(dos.LightGray, bar), right)
+		} else if avail := W - x - 2; avail > 4 { // crowded: truncate instead of dropping
+			s.Print(x+1, 0, dos.Attr(dos.LightGray, bar), trunc(right, avail))
+		}
+	}
 }
 
 // drawModal draws a centered dialog box with margins and a drop shadow over the
@@ -487,32 +572,120 @@ func (a *App) bruteSelected() {
 	}
 }
 
-// hitService maps the selected Hall-of-Fame hit to its discovered Service, if
-// one exists.
-func (a *App) hitService() (engine.Service, bool) {
-	hits := a.eng.State().HitsSnapshot()
-	if a.hofSel < 0 || a.hofSel >= len(hits) {
-		return engine.Service{}, false
+// runGame drops the running scanner into the war-dialing game, built from the
+// services discovered SO FAR. The scan keeps running in its goroutine the whole
+// time; when the player quits the game we repaint and resume the scanner exactly
+// where it was. The game shares this shell's output + keystroke channel.
+func (a *App) runGame(ctx context.Context, keys <-chan byte) {
+	svcs := a.eng.State().ServicesSnapshot()
+	if len(svcs) == 0 {
+		a.setToast("No services found yet — keep scanning, then press G to jack in")
+		return
 	}
-	tgt := hits[len(hits)-1-a.hofSel].Target // list is newest-first
-	for _, sv := range a.eng.State().ServicesSnapshot() {
-		if sv.Target() == tgt {
-			return sv, true
-		}
+	seedSvcs := make([]game.SeedService, 0, len(svcs))
+	for _, sv := range svcs {
+		seedSvcs = append(seedSvcs, game.SeedService{
+			IP: sv.IP, Port: int(sv.Port), Svc: gameSvcName(sv), Banner: gameBanner(sv),
+		})
 	}
-	return engine.Service{}, false
+	seed := game.NewSeed(a.eng.Mask().Text(), seedSvcs)
+
+	a.enableMouse(false) // the game doesn't use SGR mouse reporting
+	opt := game.RunOptions{
+		Width: a.scr.W, Height: a.scr.H, Diff: a.gameDiff,
+		Resize: func() (int, int) {
+			if w, h, ok := a.takeResize(); ok {
+				return w, h
+			}
+			return 0, 0
+		},
+	}
+	_ = game.RunEmbedded(ctx, a.out, keys, seed, gameSeedNum(), opt)
+
+	// Back from the game: re-arm mouse for the map and force a full repaint.
+	a.enableMouse(a.mode == modeToneMap)
+	io.WriteString(a.out, "\x1b[2J")
+	a.scr.Repaint()
+	a.setToast("Back from the game — the scan kept running while you were in")
 }
 
-// openHitDetail jumps from the Hall of Fame to the selected hit's full service
+func (a *App) setToast(s string) {
+	a.toast = s
+	a.toastUntil = time.Now().Add(4 * time.Second)
+}
+
+// gameSeedNum derives a per-run seed for the game world from the current time.
+func gameSeedNum() uint32 { return uint32(time.Now().UnixNano()) }
+
+// gameSvcName picks the service/app name the game keys its vectors off: nerva's
+// fingerprint if present, else a name guessed from the port.
+func gameSvcName(sv engine.Service) string {
+	if sv.App != "" {
+		return sv.App
+	}
+	return portAppName(sv.Port)
+}
+
+func gameBanner(sv engine.Service) string {
+	if sv.Banner != "" {
+		return sv.Banner
+	}
+	return sv.ConnectBanner
+}
+
+// portAppName maps a port to a service name so the game can match login/web
+// vectors when nerva hasn't fingerprinted the service.
+func portAppName(port uint16) string {
+	switch port {
+	case 21:
+		return "ftp"
+	case 22:
+		return "ssh"
+	case 23:
+		return "telnet"
+	case 25:
+		return "smtp"
+	case 80, 8080:
+		return "http"
+	case 110:
+		return "pop3"
+	case 143:
+		return "imap"
+	case 443, 8443:
+		return "https"
+	case 3306:
+		return "mysql"
+	case 3389:
+		return "rdp"
+	case 5432:
+		return "postgres"
+	case 5900:
+		return "vnc"
+	case 6379:
+		return "redis"
+	}
+	return ""
+}
+
+// selectedHostIP returns the IP of the highlighted row in the hosts view.
+func (a *App) selectedHostIP() (string, bool) {
+	rows := a.eng.State().HostScansByAddr()
+	if a.hv.sel < 0 || a.hv.sel >= len(rows) {
+		return "", false
+	}
+	return rows[a.hv.sel].IP, true
+}
+
+// openHostDetail jumps from the hosts view to the selected host's first service
 // detail in the Services view.
-func (a *App) openHitDetail() {
-	sv, ok := a.hitService()
+func (a *App) openHostDetail() {
+	ip, ok := a.selectedHostIP()
 	if !ok {
 		return
 	}
 	svcs := a.eng.State().ServicesSnapshot()
 	for i := range svcs {
-		if svcs[i].Key() == sv.Key() {
+		if svcs[i].IP == ip {
 			a.svcSel = i
 			a.svcDetail = true
 			a.setMode(modeServices)
@@ -521,9 +694,17 @@ func (a *App) openHitDetail() {
 	}
 }
 
-func (a *App) bruteHit() {
-	if sv, ok := a.hitService(); ok && sv.Brutable {
-		a.eng.StartBrute(sv.Key())
+// bruteHost launches brutus against the selected host's first brutable service.
+func (a *App) bruteHost() {
+	ip, ok := a.selectedHostIP()
+	if !ok {
+		return
+	}
+	for _, sv := range a.eng.State().ServicesSnapshot() {
+		if sv.IP == ip && sv.Brutable {
+			a.eng.StartBrute(sv.Key())
+			return
+		}
 	}
 }
 
@@ -542,6 +723,12 @@ func (a *App) enableMouse(on bool) {
 }
 
 func (a *App) moveCursor(dx, dy int) {
+	if a.mode == modeHosts {
+		if dy != 0 {
+			a.hv.move(dy)
+		}
+		return
+	}
 	if a.mode == modeServices {
 		a.svcSel += dy
 		if a.svcSel < 0 {
@@ -549,41 +736,9 @@ func (a *App) moveCursor(dx, dy int) {
 		}
 		return
 	}
-	if a.mode == modeHallOfFame {
-		a.hofSel += dy // selection; scroll is derived at draw time
-		if a.hofSel < 0 {
-			a.hofSel = 0
-		}
-		return
+	if a.mode == modeToneMap {
+		a.tm.arrow(dx, dy)
 	}
-	if a.mapAllNets {
-		n := len(a.mapSubnets)
-		if n == 0 {
-			return
-		}
-		a.curRow = clamp(a.curRow+dy, 0, n-1)
-		a.curCol = 0
-		return
-	}
-	a.curCol = clamp(a.curCol+dx, 0, 15)
-	a.curRow = clamp(a.curRow+dy, 0, 15)
-}
-
-// map grid geometry (a 16x16 /24 of 3-wide cells).
-const mapGX, mapGY, mapCellW = 3, 3, 3
-
-// hoverAt maps absolute screen coords to a /24 grid cell (per-subnet view only).
-func (a *App) hoverAt(sx, sy int) {
-	if a.mode != modeToneMap || a.mapAllNets {
-		return
-	}
-	cx := (sx - mapGX) / mapCellW
-	cy := sy - mapGY
-	if cx < 0 || cy < 0 || cx > 15 || cy > 15 {
-		return
-	}
-	a.curCol = cx
-	a.curRow = cy
 }
 
 // emitCues detects newly-completed dials and emits a private OSC sequence per
@@ -642,10 +797,10 @@ func (a *App) draw(v engine.StateView) {
 	switch {
 	case a.inSplash():
 		a.drawSplash()
+	case a.mode == modeHosts:
+		a.hv.draw(a.scr, a, v)
 	case a.mode == modeToneMap:
-		a.drawToneMap(v)
-	case a.mode == modeHallOfFame:
-		a.drawHallOfFame(v)
+		a.tm.draw(a, v)
 	case a.mode == modeServices:
 		a.drawServices(v)
 	default:
@@ -657,9 +812,28 @@ func (a *App) draw(v engine.StateView) {
 		a.drawMeter(v)
 		a.drawChrome(v)
 	}
+	if a.toast != "" && time.Now().Before(a.toastUntil) && !a.inSplash() {
+		a.drawToast()
+	}
 	if a.confirmQuit && !a.inSplash() {
 		a.drawQuitConfirm()
 	}
+}
+
+// drawToast shows a transient centered message just above the status line.
+func (a *App) drawToast() {
+	s := a.scr
+	msg := " " + a.toast + " "
+	x := (s.W - len([]rune(msg))) / 2
+	y := s.H - 2
+	if a.mode == modeDialer { // classic layout owns H-2 (copyright); sit above the meter
+		y = a.lMeterRow - 1
+	}
+	c := dos.LightCyan
+	if a.blink {
+		c = dos.White
+	}
+	s.Print(x, y, dos.Attr(dos.Black, c), msg)
 }
 
 // drawQuitConfirm overlays a small centered "are you sure?" dialog.
@@ -864,7 +1038,7 @@ func (a *App) drawChrome(v engine.StateView) {
 	s.Print((a.scr.W-len([]rune(cr)))/2, a.lCopyRow, dos.Attr(cc, dos.Black), cr)
 
 	// Bottom status line: keys on the left, transient message blinking right.
-	keys := " ESC:quit  SPC:abort  P:pause  R:redial  S:speaker  X:+wait  N/C/F/G/V/Y:note "
+	keys := " ESC:close  1-4/M:views  G:game  P:pause  R:redial  S:speaker  X:+wait  N/C/F/V/Y:note "
 	s.Print(0, a.lStatRow, dos.Attr(dos.Black, dos.LightGray), dos.Pad(keys, a.scr.W))
 
 	msg := v.Status

@@ -35,7 +35,7 @@ func TestWebSocketSession(t *testing.T) {
 	defer conn.Close()
 
 	// We should receive ANSI render output; the intro splash plays first, so
-	// read until the dialer's Activity Log window appears.
+	// read until the default Hosts view header appears.
 	conn.SetReadDeadline(time.Now().Add(6 * time.Second))
 	var got strings.Builder
 	buf := make([]byte, 8192)
@@ -45,15 +45,15 @@ func TestWebSocketSession(t *testing.T) {
 			break
 		}
 		got.Write(buf[:n])
-		if strings.Contains(got.String(), "Activity Log") {
+		if strings.Contains(got.String(), "HOSTS") {
 			break
 		}
 	}
 	if !strings.Contains(got.String(), "\x1b[") {
 		t.Fatalf("expected ANSI escapes from server, got %q", truncate(got.String()))
 	}
-	if !strings.Contains(got.String(), "Activity Log") {
-		t.Fatalf("expected the Activity Log window in output, got %q", truncate(got.String()))
+	if !strings.Contains(got.String(), "HOSTS") {
+		t.Fatalf("expected the Hosts view in output, got %q", truncate(got.String()))
 	}
 
 	// Send a quit key (ESC); the session should accept input without error.

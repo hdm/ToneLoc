@@ -37,24 +37,33 @@ func TestGenerateScreenshot(t *testing.T) {
 	splash.frame = 9
 	write(t, dir+"/toneloc-splash.svg", splash.FrameSVG())
 
+	// Hosts view (the default): full-screen per-host progress bars.
+	hosts := New(eng, nil)
+	hosts.SetSize(150, 46)
+	hosts.frame = 4
+	write(t, dir+"/toneloc-hosts.svg", hosts.FrameSVG())
+
 	// Dialer view, at a larger terminal to show the responsive layout.
 	dialer := New(eng, nil)
 	dialer.SetSize(132, 42)
+	dialer.setMode(modeDialer)
 	dialer.frame = 4
 	write(t, dir+"/toneloc-dialer.svg", dialer.FrameSVG())
 
-	// ToneMap view, cursor parked on a populated cell.
+	// ToneMap view, full screen, whole network.
 	tm := New(eng, nil)
+	tm.SetSize(160, 48)
 	tm.setMode(modeToneMap)
-	tm.curCol, tm.curRow = 18, 9
+	tm.tm.curX, tm.tm.curY = 24, 12
 	tm.frame = 4
+	tm.draw(eng.State().Snapshot()) // first draw establishes the grid dims
 	write(t, dir+"/toneloc-tonemap.svg", tm.FrameSVG())
 
-	// Hall of Fame.
-	hof := New(eng, nil)
-	hof.setMode(modeHallOfFame)
-	hof.frame = 4
-	write(t, dir+"/toneloc-halloffame.svg", hof.FrameSVG())
+	// ToneMap zoomed in twice around the cursor.
+	tm.feed('+')
+	tm.feed('+')
+	tm.frame = 4
+	write(t, dir+"/toneloc-tonemap-zoom.svg", tm.FrameSVG())
 
 	// Services view: kick off a few brutes so statuses/compromise show, then
 	// render the list and a detail card.

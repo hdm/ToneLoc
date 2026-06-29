@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -40,12 +41,15 @@ type Engine struct {
 
 	toolkit   Toolkit         // nerva (fingerprint/udp) + brutus (creds)
 	bgCtx     context.Context // long-lived context for tool goroutines
+	bgMu      sync.Mutex      // guards bgCtx (set in Run, read by recon goroutines)
 	sessionID string          // resumable session log id
 	nervaOn   bool            // nerva UDP discovery + fingerprinting enabled
 	brutusOn  bool            // brutus credential testing enabled
 
 	bruteMu      sync.Mutex                    // guards bruteCancels
 	bruteCancels map[string]context.CancelFunc // per-service brute cancellers
+
+	dispatched uint64 // targets launched in the parallel sweep (atomic)
 }
 
 func onOff(b bool) string {
@@ -54,6 +58,9 @@ func onOff(b bool) string {
 	}
 	return "off"
 }
+
+func (e *Engine) setBgCtx(ctx context.Context) { e.bgMu.Lock(); e.bgCtx = ctx; e.bgMu.Unlock() }
+func (e *Engine) ctxBG() context.Context       { e.bgMu.Lock(); defer e.bgMu.Unlock(); return e.bgCtx }
 
 // NervaEnabled reports whether nerva discovery/fingerprinting is on.
 func (e *Engine) NervaEnabled() bool { return e.nervaOn }
@@ -239,7 +246,7 @@ func (e *Engine) selectProbe(ctx context.Context) Probe {
 	case "connect":
 		return NewConnectProbe(400 * time.Millisecond)
 	case "zmap":
-		p, err := NewZmapProbe(ctx, e.job, func(s string) { e.log(s) })
+		p, err := NewZmapScanner(ctx, e.job, func(s string) { e.log(s) })
 		if err != nil {
 			e.logf("zmap backend unavailable: %v", err)
 			e.logf("Falling back to simulator.")
@@ -323,8 +330,23 @@ func (e *Engine) Run(ctx context.Context) {
 	defer close(e.done)
 	defer e.probe.Close()
 
-	e.bgCtx = ctx
+	e.setBgCtx(ctx)
 	go e.discoverUDP(ctx) // nerva UDP sweep, concurrent with the TCP dialer
+
+	// Streaming SYN scan: the zmap-go stateless scanner drives discovery directly,
+	// recording each reply as it arrives (the map/host bars fill in real time) and
+	// marking the silent targets timeout once it cools down.
+	if z, ok := e.probe.(*ZmapScanner); ok {
+		e.runSynStream(ctx, z)
+		return
+	}
+
+	// Fast path: probe many targets at once. This is what makes a real connect
+	// scan quick; sim stays serial so it animates.
+	if conc := e.concurrency(); conc > 1 {
+		e.runConcurrent(ctx, e.job.WaitDelay, conc)
+		return
+	}
 
 	waitDelay := e.job.WaitDelay
 	var pending *target // a target to (re)dial before pulling the next
@@ -403,6 +425,178 @@ func (e *Engine) Run(ctx context.Context) {
 		e.record(res)
 		e.autosave(false)
 	}
+}
+
+// concurrency reports how many targets to probe at once: an explicit Job value,
+// else an auto default (parallel for the connect backend, serial otherwise).
+func (e *Engine) concurrency() int {
+	if e.job.Concurrency > 0 {
+		return e.job.Concurrency
+	}
+	if e.job.Backend == "connect" {
+		return 128 // fast, and safe under the common 256-fd soft limit
+	}
+	return 1 // sim animates one dial at a time; zmap uses its own streaming path
+}
+
+// runSynStream drives the zmap-go stateless SYN scanner per network, feeding each
+// classified reply straight into the same record() path the dialer uses (so
+// stats, the ToneMap, the host bars and nerva all light up live), then marking
+// the silent targets timeout. It is far faster than dialing: the sweep is bounded
+// by the cooldown, not by per-target latency.
+func (e *Engine) runSynStream(ctx context.Context, z *ZmapScanner) {
+	rec := func(res Result) {
+		e.record(res)
+		e.autosave(false)
+	}
+	prog := func(sent, total, answered int) {
+		e.setStatus(fmt.Sprintf("SYN sweep — %d/%d sent · %d open/reset", sent, total, answered))
+	}
+	const cooldown = 2 * time.Second
+	for i := range e.masks {
+		select {
+		case <-ctx.Done():
+			e.finish("Escaped")
+			return
+		default:
+		}
+		e.switchMask(i)
+		z.StreamMask(ctx, e.masks[i], e.job.Ports, cooldown, rec, prog)
+	}
+	e.finish("DARKCIDR Exiting ...")
+}
+
+// runConcurrent is the parallel sweep: a single producer goroutine walks the
+// target space (nextTarget is not concurrency-safe, so only it touches the
+// segment cursor) and launches up to `conc` bounded workers; the main loop here
+// collects their results, records them, and services interactive controls. The
+// recon pipeline, stats, ToneMap, host bars, autosave and .DAT all flow through
+// the same record() path the serial dialer uses.
+func (e *Engine) runConcurrent(ctx context.Context, waitDelay time.Duration, conc int) {
+	dialCtx, dialCancel := context.WithCancel(ctx)
+	defer dialCancel()
+
+	results := make(chan Result, conc)
+	sem := make(chan struct{}, conc)
+	stop := make(chan struct{})
+	producerDone := make(chan struct{})
+	var wg sync.WaitGroup
+	var stopOnce sync.Once
+	halt := func() { stopOnce.Do(func() { close(stop); dialCancel() }) }
+
+	// Producer: pull targets and launch workers, throttled by the semaphore.
+	go func() {
+		defer close(producerDone)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-dialCtx.Done():
+				return
+			default:
+			}
+			for e.isPaused() {
+				select {
+				case <-stop:
+					return
+				case <-dialCtx.Done():
+					return
+				case <-time.After(80 * time.Millisecond):
+				}
+			}
+			if e.job.Limit > 0 && atomic.LoadUint64(&e.dispatched) >= e.job.Limit {
+				return
+			}
+			addr, port, ok := e.nextTarget()
+			if !ok {
+				return
+			}
+			tgt := target{addr: addr, port: port}
+			if e.job.excluded(tgt.addr) {
+				continue
+			}
+			if e.datHas(tgt.addr.String() + ":" + itoa(tgt.port)) {
+				continue
+			}
+			select {
+			case sem <- struct{}{}:
+			case <-stop:
+				return
+			case <-dialCtx.Done():
+				return
+			}
+			atomic.AddUint64(&e.dispatched, 1)
+			e.markDialing(tgt)
+			wg.Add(1)
+			go func(t target) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				results <- e.probe.Dial(dialCtx, t.addr, t.port, waitDelay, e.job.MaxRings)
+			}(tgt)
+		}
+	}()
+
+	// Close results once the producer has stopped and all workers have drained.
+	go func() { <-producerDone; wg.Wait(); close(results) }()
+
+	for {
+		select {
+		case <-ctx.Done():
+			halt()
+			for res := range results { // drain workers, keep partial results
+				e.record(res)
+			}
+			e.finish("Escaped")
+			return
+		case c := <-e.ctrl:
+			if e.handleConcurrentCtl(c) {
+				halt()
+				for res := range results {
+					e.record(res)
+				}
+				e.finish("DARKCIDR Exiting ...")
+				return
+			}
+		case res, ok := <-results:
+			if !ok {
+				e.finish("DARKCIDR Exiting ...")
+				return
+			}
+			e.record(res)
+			e.autosave(false)
+		}
+	}
+}
+
+// handleConcurrentCtl applies an interactive control during a parallel sweep.
+// Single-dial controls (abort/redial/+wait/note) have no meaning across a swarm,
+// so they leave a brief note instead.
+func (e *Engine) handleConcurrentCtl(c control) (quit bool) {
+	switch c.kind {
+	case ctlQuit:
+		return true
+	case ctlPause:
+		e.setPaused(true)
+		e.setStatus("Paused - press P to continue")
+	case ctlResume:
+		e.setPaused(false)
+		e.setStatus("")
+	case ctlSpeaker:
+		e.toggleSpeaker()
+	case ctlAbort, ctlRedial, ctlAddWait:
+		e.setStatus("parallel sweep — P pauses, ESC quits")
+	}
+	return false
+}
+
+// markDialing reflects a just-launched target in the live state (the Socket
+// window echo + the "current" target the per-host strip follows).
+func (e *Engine) markDialing(tgt target) {
+	target := tgt.addr.String() + ":" + itoa(tgt.port)
+	e.state.mu.Lock()
+	e.state.Target = target
+	e.state.mu.Unlock()
+	e.modem("SYN  " + target)
 }
 
 // autosave writes the data file at most every 15s while a scan runs (and always

@@ -19,25 +19,33 @@ import (
 	"github.com/hdm/zmap-go/pkg/validate"
 )
 
-// ZmapProbe drives zmap-go IN-PROCESS as a library (no subprocess, no building
-// a binary). It opens a raw socket, sends a tcp_synscan SYN to every target up
-// front -- exactly what a stateless mass scanner is good at -- and records every
-// classified response. The interactive dialer then "redials" each target by
-// looking up what the sweep heard; targets that never answered are timeouts.
+// ZmapScanner drives zmap-go IN-PROCESS as a library (no subprocess, no building
+// a binary). It is the real stateless SYN scanner: it opens a raw socket and
+// blasts a tcp_synscan SYN at every (target, port), classifying the AES-validated
+// replies. Crucially it STREAMS -- each open/reset is recorded the instant the
+// reply arrives, so the map and host bars fill in real time during the sweep --
+// and any target that never answers is marked timeout once the sweep cools down.
 //
 // A real SYN scan needs raw-socket privileges and a live network; when that is
-// unavailable NewZmapProbe returns an error and the caller falls back to the
-// simulator.
-type ZmapProbe struct {
-	hits    map[string]Response // "ip:port" -> Carrier/Busy
-	scanned int
+// unavailable NewZmapScanner returns an error and the caller falls back to the
+// simulator. Setup (interface/gateway/MAC) happens up front; the sweep itself is
+// driven later by StreamMask, so it never blocks engine startup.
+type ZmapScanner struct {
+	intf   *net.Interface
+	srcIP  net.IP
+	srcMAC net.HardwareAddr
+	gwMAC  net.HardwareAddr
+	v      *validate.Validator
+	m      *probe.TCPSyn
+	log    func(string)
 }
 
 const zmapSrcPortFirst, zmapSrcPortLast = 32768, 61000
 
-// NewZmapProbe runs an in-process SYN sweep over the job's networks/ports using
-// zmap-go's packet, raw, probe and validate packages, and indexes the responses.
-func NewZmapProbe(ctx context.Context, job Job, log func(string)) (*ZmapProbe, error) {
+// NewZmapScanner resolves the interface, default gateway and validator needed for
+// raw SYN crafting. It does NOT sweep -- that is StreamMask's job -- so it returns
+// fast and the UI can come up immediately.
+func NewZmapScanner(ctx context.Context, job Job, log func(string)) (*ZmapScanner, error) {
 	intf, srcIP, srcMAC, err := localInterface()
 	if err != nil {
 		return nil, fmt.Errorf("zmap: %w", err)
@@ -46,7 +54,7 @@ func NewZmapProbe(ctx context.Context, job Job, log func(string)) (*ZmapProbe, e
 	if err != nil {
 		return nil, fmt.Errorf("zmap: raw socket on %s (needs root/cap_net_raw): %w", intf.Name, err)
 	}
-	defer conn.Close()
+	defer conn.Close() // only needed here to resolve the gateway MAC
 
 	gwIP, err := gateway.DefaultGateway(intf)
 	if err != nil {
@@ -62,113 +70,155 @@ func NewZmapProbe(ctx context.Context, job Job, log func(string)) (*ZmapProbe, e
 	}
 	m := &probe.TCPSyn{Style: packet.StyleWindows, TTL: 255,
 		SrcPortFirst: zmapSrcPortFirst, SrcPortLast: zmapSrcPortLast}
-
 	if log != nil {
-		log(fmt.Sprintf("Initializing modem ... zmap tcp_synscan (library) via %s -> gw %s", intf.Name, gwIP))
+		log(fmt.Sprintf("Initializing modem ... zmap tcp_synscan (streaming) via %s -> gw %s", intf.Name, gwIP))
 	}
+	return &ZmapScanner{intf: intf, srcIP: srcIP, srcMAC: srcMAC, gwMAC: gwMAC, v: v, m: m, log: log}, nil
+}
 
-	p := &ZmapProbe{hits: map[string]Response{}}
-	var mu sync.Mutex
-	done := make(chan struct{})
+func (z *ZmapScanner) Name() string { return "zmap tcp_synscan (lib)" }
 
-	// Receiver: validate replies and record carriers (synack) / busies (rst).
+func (z *ZmapScanner) Close() error { return nil }
+
+// Dial is unused in streaming mode (the engine drives StreamMask directly); it
+// exists only so ZmapScanner satisfies the Probe interface.
+func (z *ZmapScanner) Dial(ctx context.Context, addr netip.Addr, port uint16, waitDelay time.Duration, maxRings int) Result {
+	return Result{Addr: addr, Port: port, Response: RespTimeout, Tries: 1, Rings: 1}
+}
+
+// StreamMask runs a stateless SYN sweep of one mask across the given ports. Every
+// classified reply is reported to onResult AS IT ARRIVES (open = Carrier, reset =
+// Busy), so the UI fills live; after the sweep cools down, every target that
+// never answered is reported as RespTimeout. progress is called periodically with
+// (sent, total, answered). It honours ctx cancellation throughout.
+func (z *ZmapScanner) StreamMask(ctx context.Context, mask *Mask, ports []uint16, cooldown time.Duration,
+	onResult func(Result), progress func(sent, total, answered int)) {
+
+	conn, err := raw.ListenPacket(z.intf.Name)
+	if err != nil {
+		if z.log != nil {
+			z.log("zmap: reopen raw socket: " + err.Error())
+		}
+		return
+	}
 	lt := layers.LayerTypeEthernet
 	if conn.LinkType() == "loopback" || conn.LinkType() == "null" {
 		lt = layers.LayerTypeLoopback
 	}
+
+	var mu sync.Mutex
+	seen := make(map[string]bool)
+	answered := 0
+	done := make(chan struct{})
+
+	// Receiver: validate replies and stream carriers (synack) / resets (rst).
 	go func() {
 		defer close(done)
 		buf := make([]byte, 65536)
 		for {
-			n, err := conn.ReadFrom(buf)
-			if err != nil {
+			n, rerr := conn.ReadFrom(buf)
+			if rerr != nil {
 				return // conn closed after cooldown
 			}
 			pkt := gopacket.NewPacket(buf[:n], lt, gopacket.NoCopy)
-			r, ok := m.ValidatePacket(pkt, v, srcIP, zmapSrcPortFirst, zmapSrcPortLast)
+			r, ok := z.m.ValidatePacket(pkt, z.v, z.srcIP, zmapSrcPortFirst, zmapSrcPortLast)
 			if !ok {
+				continue
+			}
+			a, ok2 := netip.AddrFromSlice(r.SrcIP.To4())
+			if !ok2 {
+				continue
+			}
+			port := uint16(r.SrcPort)
+			key := a.String() + ":" + itoa(port)
+			mu.Lock()
+			dup := seen[key]
+			if !dup {
+				seen[key] = true
+				answered++
+			}
+			mu.Unlock()
+			if dup {
 				continue
 			}
 			resp := RespBusy
 			if r.Success {
 				resp = RespCarrier
 			}
-			key := r.SrcIP.String() + ":" + itoa(r.SrcPort)
-			mu.Lock()
-			p.hits[key] = resp
-			mu.Unlock()
+			res := Result{Addr: a, Port: port, Response: resp, Tries: 1, Rings: 1}
+			if resp == RespBusy {
+				res.Rings = 0
+			}
+			onResult(res)
 		}
 	}()
 
-	// Sender: one SYN per (target, port), across every network in the job.
-	srcU := ipBE(srcIP)
-	const maxProbes = 1 << 20 // safety cap
+	// Sender: one SYN per (target, port).
+	srcU := ipBE(z.srcIP)
+	span := mask.Span()
+	total := int(span) * len(ports)
 	sent := 0
-	for _, mask := range job.maskList() {
-		span := mask.Span()
-		for i := uint32(0); i < span && sent < maxProbes; i++ {
-			select {
-			case <-ctx.Done():
-				goto cooldown
-			default:
+sendLoop:
+	for i := uint32(0); i < span; i++ {
+		select {
+		case <-ctx.Done():
+			break sendLoop
+		default:
+		}
+		a := mask.Addr(i).As4()
+		dstIP := net.IPv4(a[0], a[1], a[2], a[3])
+		dstU := ipBE(dstIP)
+		for _, port := range ports {
+			t := z.v.GenWords(srcU, dstU, uint32(port), 0)
+			frame, _, berr := z.m.BuildProbe(z.srcIP, dstIP, port, z.srcMAC, z.gwMAC, uint16(t[2]), t)
+			if berr != nil {
+				continue
 			}
-			a := mask.Addr(i).As4()
-			dstIP := net.IPv4(a[0], a[1], a[2], a[3])
-			dstU := ipBE(dstIP)
-			for _, port := range job.Ports {
-				t := v.GenWords(srcU, dstU, uint32(port), 0)
-				frame, _, berr := m.BuildProbe(srcIP, dstIP, port, srcMAC, gwMAC, uint16(t[2]), t)
-				if berr != nil {
-					continue
-				}
-				_, _ = conn.WriteTo(frame)
-				sent++
+			_, _ = conn.WriteTo(frame)
+			sent++
+			if progress != nil && sent%512 == 0 {
+				mu.Lock()
+				ans := answered
+				mu.Unlock()
+				progress(sent, total, ans)
 			}
 		}
 	}
-	p.scanned = sent
+	if progress != nil {
+		mu.Lock()
+		ans := answered
+		mu.Unlock()
+		progress(sent, total, ans)
+	}
 
-cooldown:
-	// Give late replies a moment, then close the conn to unblock the receiver.
+	// Cooldown to catch stragglers, then unblock the receiver.
 	select {
 	case <-ctx.Done():
-	case <-time.After(4 * time.Second):
+	case <-time.After(cooldown):
 	}
 	conn.Close()
 	<-done
 
-	mu.Lock()
-	n := len(p.hits)
-	mu.Unlock()
-	if log != nil {
-		log(fmt.Sprintf("zmap sweep complete: %d SYNs sent, %d responses indexed", sent, n))
+	if z.log != nil {
+		z.log(fmt.Sprintf("zmap sweep of %s: %d SYNs, %d answered", mask.Text(), sent, answered))
 	}
-	return p, nil
-}
 
-func (z *ZmapProbe) Name() string { return "zmap tcp_synscan (lib)" }
-
-func (z *ZmapProbe) Close() error { return nil }
-
-func (z *ZmapProbe) Dial(ctx context.Context, addr netip.Addr, port uint16, waitDelay time.Duration, maxRings int) Result {
-	res := Result{Addr: addr, Port: port, Tries: 1, Rings: 1}
-	// A short, bounded pause so the meter still animates over the replayed
-	// sweep -- the data is already in hand.
-	select {
-	case <-ctx.Done():
-		res.Response = RespAborted
-		return res
-	case <-time.After(min(waitDelay/8, 120*time.Millisecond)):
-	}
-	if r, ok := z.hits[addr.String()+":"+itoa(port)]; ok {
-		res.Response = r
-		if r == RespBusy {
-			res.Rings = 0
+	// Everything we never heard from is a timeout -- fill the rest of the map.
+	for i := uint32(0); i < span; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		default:
 		}
-		return res
+		addr := mask.Addr(i)
+		base := addr.String() + ":"
+		for _, port := range ports {
+			if seen[base+itoa(port)] { // receiver is done; safe to read unlocked
+				continue
+			}
+			onResult(Result{Addr: addr, Port: port, Response: RespTimeout, Tries: 1, Rings: 1})
+		}
 	}
-	res.Response = RespTimeout
-	return res
 }
 
 // localInterface picks the first up, non-loopback interface with an IPv4

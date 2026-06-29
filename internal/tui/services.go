@@ -21,8 +21,7 @@ func (a *App) drawServices(v engine.StateView) {
 			comp++
 		}
 	}
-	hdr := fmt.Sprintf(" Services   %d found   %d compromised   session %s", len(svcs), comp, v.SessionID)
-	s.Print(0, 0, dos.Attr(dos.Black, dos.LightCyan), dos.Pad(hdr, a.scr.W))
+	a.drawModeBar(modeServices, fmt.Sprintf("★ HALL OF FAME · %d found · %d pwned · %s ", len(svcs), comp, v.SessionID))
 
 	if len(svcs) == 0 {
 		center(s, 11, dos.Attr(dos.LightGray, dos.Black), "no services discovered yet -- scanning...")
@@ -45,17 +44,19 @@ func (a *App) drawServices(v engine.StateView) {
 		return
 	}
 
-	// Scrolling list.
-	top, rows := 2, a.lStatRow-3
+	// Scrolling list. The box spans top..bottom; row 2 (inside the frame) holds
+	// the column header so it never punches the top border, and rows start at 3.
+	top, rows := 3, a.lStatRow-4
 	if a.svcSel < a.svcScroll {
 		a.svcScroll = a.svcSel
 	}
 	if a.svcSel >= a.svcScroll+rows {
 		a.svcScroll = a.svcSel - rows + 1
 	}
-	s.Box(0, 1, a.scr.W, rows+2, dos.Attr(dos.LightCyan, dos.Black), true)
-	s.Title(0, 1, a.scr.W, dos.Attr(dos.White, dos.Black), "Discovered Services")
-	s.Print(2, 1, dos.Attr(dos.DarkGray, dos.Black), " target               proto app          status ")
+	s.Box(0, 1, a.scr.W, rows+3, dos.Attr(dos.LightCyan, dos.Black), true)
+	s.Title(0, 1, a.scr.W, dos.Attr(dos.White, dos.Black), "Discovered Services · Hall of Fame")
+	s.Fill(1, 2, a.scr.W-2, 1, ' ', dos.Attr(dos.DarkGray, dos.Black))
+	s.Print(2, 2, dos.Attr(dos.Yellow, dos.Black), "  target               proto app          status")
 
 	for i := 0; i < rows; i++ {
 		idx := i + a.svcScroll
@@ -166,7 +167,7 @@ func repeat(s string, n int) string {
 
 func (a *App) svcHints() {
 	a.scr.Print(0, a.lStatRow, dos.Attr(dos.Black, dos.LightGray),
-		dos.Pad(" M/TAB:next view   j/k or arrows:select   ENTER:detail   B:brute   X:cancel   ESC:quit", a.scr.W))
+		dos.Pad(" M/TAB:next view   j/k or arrows:select   ENTER:detail   B:brute   X:cancel   ESC:close", a.scr.W))
 }
 
 func svcColor(sv engine.Service) int {

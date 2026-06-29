@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss: https://cdn.jsdelivr.net; img-src 'self' data:; font-src 'self' data:; worker-src 'self' blob:" />
 <title>DARKCIDR &mdash; a ToneLoc/Go war-dialing roguelike</title>
 <style>
   :root { --amber:#ffb000; --green:#33ff66; --phos:rgba(80,255,140,.45); }
@@ -170,7 +171,7 @@ function fontForViewport(){
 async function makeTerminal(fontSize){
   const theme={ background:'#000000', foreground:'#aaaaaa', cursor:'#33ff66' };
   try{
-    const g = await import('https://cdn.jsdelivr.net/npm/ghostty-web/+esm');
+    const g = await import('https://cdn.jsdelivr.net/npm/ghostty-web@latest/+esm');
     if (g.init) await g.init();
     const term = new g.Terminal({ fontSize, theme });
     term.open(mount);
@@ -178,8 +179,8 @@ async function makeTerminal(fontSize){
   }catch(e){
     console.warn('ghostty-web unavailable, falling back to xterm.js:', e);
     const l=document.createElement('link'); l.rel='stylesheet';
-    l.href='https://cdn.jsdelivr.net/npm/@xterm/xterm/css/xterm.css'; document.head.appendChild(l);
-    const x = await import('https://cdn.jsdelivr.net/npm/@xterm/xterm/+esm');
+    l.href='https://cdn.jsdelivr.net/npm/@xterm/xterm@5/css/xterm.css'; document.head.appendChild(l);
+    const x = await import('https://cdn.jsdelivr.net/npm/@xterm/xterm@5/+esm');
     const term = new x.Terminal({ fontSize, theme, convertEol:false });
     term.open(mount);
     return { term, kind:'xterm.js (fallback)' };

@@ -24,10 +24,6 @@ func TestToneMapFrame(t *testing.T) {
 
 	app := New(eng, nil)
 	app.setMode(modeToneMap)
-	app.draw(eng.State().Snapshot()) // populate the verdict cache + subnets
-	// Move the cursor to .1 (row 0, col 1) and redraw.
-	app.curCol, app.curRow = 1, 0
-	app.draw(eng.State().Snapshot())
 	frame := app.Frame()
 
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
@@ -39,21 +35,21 @@ func TestToneMapFrame(t *testing.T) {
 			t.Fatalf("row %d width = %d, want %d", i, got, minW)
 		}
 	}
-	for _, want := range []string{"MAP", "203.0.113.0/24", "open", "unscanned", "ESC:quit"} {
+	for _, want := range []string{"DARKCIDR", "MAP", "Inspect", "zoom", "close", "203.0.113.0"} {
 		if !strings.Contains(frame, want) {
 			t.Errorf("map frame missing %q:\n%s", want, frame)
 		}
 	}
-	// The cursor on row 0 col 1 should surface 203.0.113.1 in the footer.
-	if !strings.Contains(frame, "203.0.113.1 ") {
-		t.Errorf("expected selected address 203.0.113.1 in footer:\n%s", frame)
-	}
 
-	// Toggling the all-networks overview should list the /24.
+	// Zooming in must shrink the visible window; 'a' fits the whole network back.
+	full := app.tm.count
+	app.feed('+')
+	if app.tm.count >= full {
+		t.Errorf("'+' should zoom in (count %d should be < %d)", app.tm.count, full)
+	}
 	app.feed('a')
-	app.draw(eng.State().Snapshot())
-	if f := app.Frame(); !strings.Contains(f, "all networks") || !strings.Contains(f, "203.0.113.0/24") {
-		t.Errorf("all-nets overview missing subnet:\n%s", f)
+	if app.tm.count != full {
+		t.Errorf("'a' should fit the whole network (count %d, want %d)", app.tm.count, full)
 	}
 }
 
@@ -64,24 +60,24 @@ func TestModeToggleAndEscQuit(t *testing.T) {
 	eng, _ := engine.New(context.Background(), job)
 	app := New(eng, nil)
 
-	if app.mode != modeDialer {
-		t.Fatal("should start in dialer mode")
+	if app.mode != modeHosts {
+		t.Fatal("should start in hosts mode")
 	}
 	app.feed('m')
 	if app.mode != modeToneMap {
 		t.Fatal("M should switch to ToneMap")
 	}
 	app.feed('m')
-	if app.mode != modeHallOfFame {
-		t.Fatal("M again should switch to Hall of Fame")
-	}
-	app.feed('m')
 	if app.mode != modeServices {
 		t.Fatal("M again should switch to Services")
 	}
-	app.feed('\t')
+	app.feed('m')
 	if app.mode != modeDialer {
-		t.Fatal("TAB should cycle back to dialer")
+		t.Fatal("M again should switch to the classic Dialer")
+	}
+	app.feed('\t')
+	if app.mode != modeHosts {
+		t.Fatal("TAB should cycle back to hosts")
 	}
 
 	// An arrow key must NOT be read as a quit, and a CSI sequence is not a quit.

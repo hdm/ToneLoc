@@ -363,18 +363,21 @@ type tool struct {
 	dmg, alert, heat int
 	odds             float64
 	limited          bool
+	minSkill         int    // skill rank needed before it can be selected
 	desc             string // a true-to-life one-liner about the technique
 }
 
 // toolOrder preserves the JS object key order (Object.keys insertion order).
-var toolOrder = []string{"dict", "web", "creds", "bof", "phish", "zero"}
+var toolOrder = []string{"dict", "web", "creds", "sqli", "bof", "phish", "rce", "zero"}
 var tools = map[string]tool{
-	"dict":  {"brutus (dict)", '▤', []string{"telnet", "ssh", "ftp", "pop3", "telnets"}, 1, 1, 3, .65, false, "Dictionary attack: replay a wordlist of common passwords at a login."},
-	"web":   {"Web Exploit", '◰', []string{"http", "https", "http-alt"}, 2, 1, 4, .7, false, "Web exploit: SQL injection, path traversal, or auth bypass on a web app."},
-	"creds": {"Default Creds", '▣', []string{"telnet", "ssh", "ftp", "http-alt", "https"}, 2, 2, 2, .55, false, "Default creds: vendor admin/admin nobody ever changed. Loud if wrong."},
-	"bof":   {"Buffer Ovflw", '✚', []string{"*"}, 3, 2, 6, .5, true, "Buffer overflow: overrun a fixed buffer to hijack execution. One-shot."},
-	"phish": {"Phishing", '✦', []string{"*"}, 1, 0, 1, .45, false, "Phishing: bait a human into running your payload. Quiet, but a long shot."},
-	"zero":  {"0-DAY", '★', []string{"*"}, 9, 0, 8, 1, true, "Zero-day: an unknown, unpatched bug. Silent and lethal -- spend it wisely."},
+	"dict":  {"brutus (dict)", '▤', []string{"telnet", "ssh", "ftp", "pop3", "telnets"}, 1, 1, 3, .65, false, 0, "Dictionary attack: replay a wordlist of common passwords at a login."},
+	"web":   {"Web Exploit", '◰', []string{"http", "https", "http-alt"}, 2, 1, 4, .7, false, 0, "Web exploit: SQL injection, path traversal, or auth bypass on a web app."},
+	"creds": {"Default Creds", '▣', []string{"telnet", "ssh", "ftp", "http-alt", "https"}, 2, 2, 2, .55, false, 0, "Default creds: vendor admin/admin nobody ever changed. Loud if wrong."},
+	"sqli":  {"SQL Inject", '◳', []string{"http", "https", "mysql", "postgres", "http-alt"}, 3, 1, 4, .68, false, 1, "Stacked SQLi: dump tables, then write a shell. Skill unlock at rank 1."},
+	"bof":   {"Buffer Ovflw", '✚', []string{"*"}, 3, 2, 6, .5, true, 0, "Buffer overflow: overrun a fixed buffer to hijack execution. One-shot."},
+	"phish": {"Phishing", '✦', []string{"*"}, 1, 0, 1, .45, false, 0, "Phishing: bait a human into running your payload. Quiet, but a long shot."},
+	"rce":   {"Remote RCE", '⚷', []string{"*"}, 5, 1, 5, .8, true, 2, "Chained RCE kit. Hits almost anything -- skill unlock at rank 2, or loot one."},
+	"zero":  {"0-DAY", '★', []string{"*"}, 9, 0, 8, 1, true, 0, "Zero-day: an unknown, unpatched bug. Silent and lethal -- spend it wisely."},
 }
 
 func applies(t tool, svc string) bool {
@@ -465,6 +468,8 @@ type Game struct {
 	heatSpike      float64
 	inv            map[string]int
 	knownPw        map[int]bool
+	skill          int // rank: rises as you own hosts, unlocks better exploits
+	stolenKits     int // RCE/0-day kits looted off rivals' machines
 	msg            string
 	msgUntil       time.Time
 	inf            *infState
@@ -530,8 +535,10 @@ func (g *Game) newGame(seedNum uint32) {
 	g.connected = true
 	g.trace = 0
 	g.heatSpike = 0
-	g.inv = map[string]int{"dict": 99, "web": 99, "creds": 99, "phish": 99, "bof": d.startBof, "zero": d.startZero}
+	g.inv = map[string]int{"dict": 99, "web": 99, "creds": 99, "phish": 99, "bof": d.startBof, "zero": d.startZero, "sqli": 99, "rce": 0}
 	g.knownPw = map[int]bool{}
+	g.skill = 0
+	g.stolenKits = 0
 	g.msg = ""
 	g.msgUntil = time.Time{}
 	g.inf = nil
@@ -599,9 +606,14 @@ func (g *Game) ownedDepth() int {
 func (g *Game) toolIds() []string {
 	var out []string
 	for _, id := range toolOrder {
-		if !tools[id].limited || g.inv[id] > 0 {
-			out = append(out, id)
+		t := tools[id]
+		if t.limited && g.inv[id] <= 0 {
+			continue // spent / never looted
 		}
+		if t.minSkill > g.skill {
+			continue // not learned yet -- earn the rank
+		}
+		out = append(out, id)
 	}
 	return out
 }
@@ -677,6 +689,30 @@ func (g *Game) scan(n *node) {
 	}
 }
 
+// stealKit decides whether a compromised box hands you a rival's exploit kit,
+// keyed off the services the SCAN actually found on it: web/db boxes tend to
+// hide RCE chains; deep, juicy hosts sometimes a 0-day. Deterministic per host.
+func (g *Game) stealKit(n *node) string {
+	r := mulberry32(hash32(n.ip + "#kit"))
+	hot := n.objective || n.loot > 120
+	web := false
+	for _, p := range n.ports {
+		switch p.svc {
+		case "http", "https", "http-alt", "mysql", "postgres":
+			web = true
+		}
+	}
+	switch {
+	case hot && r() < 0.5:
+		return "zero"
+	case web && r() < 0.45:
+		return "rce"
+	case r() < 0.2:
+		return "rce"
+	}
+	return ""
+}
+
 func (g *Game) loot(n *node) {
 	if n.state != "owned" {
 		g.setMsg("Compromise it first.", 1400)
@@ -695,6 +731,15 @@ func (g *Game) loot(n *node) {
 			g.inv[n.tool]++
 			extra = " + " + tools[n.tool].name
 		}
+	}
+	// Surprise loot: rivals leave their toolkits behind. What you find is keyed
+	// off what the box actually runs (its scanned services), so the network you
+	// found shapes your arsenal. Web/db boxes drop RCE kits; juicy hosts, 0-days.
+	if kit := g.stealKit(n); kit != "" {
+		g.inv[kit]++
+		g.stolenKits++
+		extra += " + STOLEN " + tools[kit].name
+		g.logf("  found a rival's " + tools[kit].name + " on disk -- reusing it")
 	}
 	if n.intelFor >= 0 && !g.knownPw[n.intelFor] {
 		g.knownPw[n.intelFor] = true
@@ -720,7 +765,32 @@ func (g *Game) toggleConnect() {
 		g.setMsg("DARK -- safe, but blind to the net", 1600)
 		if g.objectiveTaken {
 			g.win()
+			return
 		}
+		// Cutting the line cools the trace, but pulling out fast burns your
+		// intermediate footholds: a deep pivot can go cold while you're away.
+		g.dropPivot()
+	}
+}
+
+// dropPivot loses your DEEPEST non-router foothold when going dark -- the price
+// of cooling off. Routers/home/uplink and the objective hold; you can re-own
+// from a kept node, so it never strands the win.
+func (g *Game) dropPivot() {
+	var deep *node
+	for _, n := range g.world.nodes {
+		if n.state == "owned" && n.kind != "home" && n.kind != "uplink" && n.kind != "router" && !n.objective {
+			if deep == nil || n.depth > deep.depth {
+				deep = n
+			}
+		}
+	}
+	if deep != nil && deep.depth >= 3 && hash32(deep.ip+"#drk"+strconv.Itoa(deep.alert))%5 < 3 {
+		deep.state = "discovered"
+		deep.shieldCur = max(1, deep.shield/2)
+		deep.looted = false
+		g.logf("- lost foothold on " + deep.host + " while dark (relay went cold)")
+		g.setMsg("WENT DARK: lost grip on "+deep.host+". Re-own it later.", 2400)
 	}
 }
 
@@ -774,9 +844,22 @@ func (g *Game) infiltrateAttempt() {
 	ok := applies(t, svc)
 	roll := mulberry32(hash32(n.ip + id + svc + strconv.Itoa(n.alert) + strconv.Itoa(len(inf.log))))()
 	g.trace = math.Min(100, g.trace+float64(t.heat)*0.25)
+	// A precious limited kit is only spent when it can actually bite -- firing a
+	// 0-day at a service it can't touch just keeps it in the bag.
+	if t.limited && !ok {
+		inf.log = append(inf.log, "» "+t.name+": no vector here -- kit kept")
+		n.alert++
+		if n.alert >= n.alertMax {
+			g.kicked()
+		}
+		return
+	}
 	if t.limited {
 		g.inv[id]--
 	}
+	// Rank sharpens every exploit: +4% odds per rank earned, capped, so deeper
+	// runs feel measurably stronger.
+	eff := math.Min(0.95, t.odds+float64(g.skill)*0.04)
 	if n.honeypot {
 		n.alert += 2
 		g.trace = math.Min(100, g.trace+22)
@@ -787,7 +870,7 @@ func (g *Game) infiltrateAttempt() {
 		}
 		return
 	}
-	if ok && roll < t.odds {
+	if ok && roll < eff {
 		n.shieldCur -= t.dmg
 		inf.log = append(inf.log, "» "+t.name+" vs "+svc+": BREACH (-"+strconv.Itoa(t.dmg)+" shield)")
 	} else {
@@ -834,6 +917,18 @@ func (g *Game) owned(n *node) {
 	g.trace = math.Min(100, g.trace+3)
 	g.logf("+ ROOT on " + n.ip + " (" + n.host + ")")
 	g.setMsg("ACCESS GRANTED :: "+n.host, 2000)
+	// Each box you crack sharpens the operator. Crossing a rank unlocks a sharper
+	// exploit class (SQLi at rank 1) -- the skill is finding & breaching targets.
+	old := g.skill
+	g.skill++
+	if old < 1 && g.skill >= 1 {
+		g.logf("  *skill up* rank 1 -- SQL injection unlocked (◳)")
+		g.setMsg("SKILL UP! Rank 1: SQL Injection unlocked ◳", 2400)
+	}
+	if old < 2 && g.skill >= 2 {
+		g.logf("  *skill up* rank 2 -- you can hand-roll RCE chains (⚷)")
+		g.setMsg("SKILL UP! Rank 2: Remote RCE unlocked ⚷", 2400)
+	}
 	for _, i := range n.links {
 		if g.world.nodes[i].state == "hidden" {
 			g.world.nodes[i].state = "discovered"
@@ -909,6 +1004,17 @@ func Run(ctx context.Context, out io.Writer, keys <-chan byte, seed *Seed, seedN
 	g := newGameState(seed, seedNum, opt.Width, opt.Height, opt.Diff)
 	enterAlt(out)
 	defer leaveAlt(out)
+	return g.runFrames(ctx, out, keys, opt)
+}
+
+// RunEmbedded plays the game inside an alternate screen the CALLER already owns
+// (e.g. the scanner shell dropping into the game with G). Unlike Run it does NOT
+// enter or leave the alternate screen itself, so when the player quits the game
+// control returns cleanly to the host UI -- which is left to repaint. The world
+// is built from the supplied seed (typically NewSeed of a live/loaded scan).
+func RunEmbedded(ctx context.Context, out io.Writer, keys <-chan byte, seed *Seed, seedNum uint32, opt RunOptions) error {
+	g := newGameState(seed, seedNum, opt.Width, opt.Height, opt.Diff)
+	io.WriteString(out, "\x1b[2J") // clear into the host's existing buffer
 	return g.runFrames(ctx, out, keys, opt)
 }
 
@@ -1190,14 +1296,20 @@ func (g *Game) update() {
 		return
 	}
 	if g.connected {
-		rate := 0.9 + 0.7*float64(g.ownedDepth())
+		rate := 1.6 + 0.9*float64(g.ownedDepth())
 		if g.objectiveTaken {
-			rate += 2.5
+			rate += 3.5 // alarms blaring once the crown jewels move
 		}
 		rate *= g.diff.normalized().traceMul
 		g.trace = math.Min(100, g.trace+rate*dt)
 		if g.heatSpike > 0 {
 			g.heatSpike -= dt * 6
+		}
+		// Home stretch: when the trace is on your doorstep, they start cutting
+		// relays -- stay live too long and you lose your deepest foothold. Get out.
+		if g.trace >= 88 && g.screen == scrMap && now.After(g.nextEvent) {
+			g.dropPivot()
+			g.nextEvent = now.Add(4 * time.Second)
 		}
 		if g.trace >= 100 {
 			g.lose()
@@ -1271,12 +1383,15 @@ func (g *Game) fireEvent() {
 		}
 	case roll < 0.70: // exploit drops onto the scene
 		tool := "bof"
-		if r() < 0.4 {
+		switch {
+		case r() < 0.25:
 			tool = "zero"
+		case r() < 0.5:
+			tool = "rce"
 		}
 		g.inv[tool]++
 		g.logf("+ exploit acquired: " + tools[tool].name)
-		g.setMsg("ZERO-DAY DROP: +1 "+tools[tool].name+". Unpatched bugs are gold.", 2600)
+		g.setMsg("EXPLOIT DROP: +1 "+tools[tool].name+". Unpatched bugs are gold.", 2600)
 		return
 	case roll < 0.84: // packet storm -- the net gets noisy, trace climbs
 		g.trace = math.Min(100, g.trace+6)
@@ -1676,7 +1791,7 @@ func (g *Game) drawTitle(blink bool) {
 	g.brailleWave(lx, top+7, lw, lcyan, black)
 	g.center(top+9, yellow, black, "war-dial the whole internet · find the carrier · breach the core")
 	g.center(top+11, white, black, "SCAN with nerva  ::  BREACH with brutus tools & password sprays")
-	g.center(top+12, white, black, "PIVOT deeper for LOOT  ::  reach the MAINFRAME and go DARK")
+	g.center(top+12, white, black, "PIVOT deeper, RANK UP, steal rivals' kits  ::  reach the MAINFRAME, go DARK")
 	g.center(top+14, lred, black, "but a TRACE crawls home while you're on the wire --")
 	g.center(top+15, lred, black, "let it reach HOME and you're BUSTED. go dark to cool it.")
 	mask := g.seed.Mask
@@ -1727,7 +1842,8 @@ func (g *Game) drawMap(blink bool) {
 		live = "● LIVE"
 	}
 	g.p(0, 0, black, hb, dos.Pad(" DARKCIDR  "+live+"   credits:"+strconv.Itoa(g.credits)+
-		"   tools:"+strconv.Itoa(len(g.toolIds()))+"   ["+g.diff.normalized().Name+"]   ESC:title", g.w))
+		"   tools:"+strconv.Itoa(len(g.toolIds()))+"   rank:"+strconv.Itoa(g.skill)+
+		"   kits:"+strconv.Itoa(g.stolenKits)+"   ["+g.diff.normalized().Name+"]   ESC:title", g.w))
 
 	g.box(0, 1, listW, panelH, lcyan, blue, true)
 	g.ttl(0, 1, listW, yellow, blue, "Network")
@@ -1767,7 +1883,21 @@ func (g *Game) drawMap(blink bool) {
 		if host == "" {
 			host = n.ip
 		}
-		line := strings.Repeat(" ", e.depth) + string(gl) + " " + host
+		idx := i + g.scroll
+		pre := ""
+		for k := 1; k < e.depth; k++ {
+			pre += "│ "
+		}
+		if e.depth > 0 {
+			last := idx+1 >= len(list) || list[idx+1].depth < e.depth
+			if last {
+				pre += "└─"
+			} else {
+				pre += "├─"
+			}
+		}
+		glX := 1 + rlen(pre)
+		line := pre + string(gl) + " " + host
 		fg := lgray
 		if sel {
 			fg = black
@@ -1777,7 +1907,7 @@ func (g *Game) drawMap(blink bool) {
 		if sel {
 			gfg = black
 		}
-		g.st(1+e.depth, y, gl, gfg, bg) // recolour the glyph in place (no double)
+		g.st(glX, y, gl, gfg, bg) // recolour the glyph in place (no double)
 		icf := icc
 		if sel {
 			icf = black
@@ -1870,6 +2000,43 @@ func (g *Game) drawMap(blink bool) {
 		}
 		if len(n.ports) == 0 {
 			g.p(rightX+3, y, dgray, black, "(none)")
+		} else {
+			// Surface a scanned banner -- intel the recon actually pulled, and a hint
+			// at how soft the box is.
+			for _, pt := range n.ports {
+				if pt.banner != "" && y < 1+detailH-1 {
+					g.p(rightX+2, y, dgray, black, dos.Pad("❧ "+pt.banner, rightW-3))
+					y++
+					break
+				}
+			}
+		}
+		// Edges: where this box can pivot. Shows the live topology -- known
+		// neighbours, color-coded by state -- so deeper paths are legible.
+		y++
+		if y < 1+detailH-1 {
+			g.p(rightX+2, y, lcyan, black, "links →")
+			y++
+			lx := rightX + 3
+			for _, li := range n.links {
+				if y >= 1+detailH-1 {
+					break
+				}
+				m := g.world.nodes[li]
+				if m.state == "hidden" {
+					continue
+				}
+				ic, icc := nodeIcon(m)
+				if lx+2 > rightX+rightW-1 {
+					lx = rightX + 3
+					y++
+					if y >= 1+detailH-1 {
+						break
+					}
+				}
+				g.st(lx, y, ic, icc, black)
+				lx += 2
+			}
 		}
 	}
 
@@ -2013,6 +2180,9 @@ func (g *Game) drawInf(blink bool) {
 	ids := g.toolIds()
 	svc := g.curVecSvc(n, inf.vec)
 	for i, id := range ids {
+		if i >= 6 { // panel fits 6 exploit rows; deeper kits scroll off honestly
+			break
+		}
 		t := tools[id]
 		selt := i == inf.tool
 		ok := applies(t, svc)
@@ -2199,13 +2369,17 @@ func (g *Game) drawHelp() {
 		"",
 		" THE TRACE is an IDS/SOC tracing your live link back to HOME. The deeper",
 		"       you sit and the longer you stay LIVE, the faster it climbs -- 100%",
-		"       means BUSTED. R goes DARK (disconnect): safe & cooling, but blind.",
-		"       Honeypots (☠) are decoy hosts; touching one spikes the trace.",
+		"       means BUSTED. R goes DARK (disconnect): safe & cooling, but it can",
+		"       cost your deepest foothold. Honeypots (☠) spike the trace.",
 		"",
 		" LOOP  S/ENTER  scan an OWNED node to reveal neighbours   (discovery)",
 		"       I/ENTER  infiltrate a DISCOVERED node             (exploitation)",
 		"       L        loot credits, tools & password intel ⚷  (credential reuse)",
-		"       R        toggle LIVE / DARK",
+		"       R        toggle LIVE / DARK   (DARK cools trace, may drop a pivot)",
+		"",
+		" GROW  every box you own raises your RANK and unlocks sharper exploits.",
+		"       loot rivals' machines for STOLEN kits (RCE/0-day) keyed to what",
+		"       they ran. work fast LIVE, exfil deep, then vanish before busted.",
 		"",
 		" BREACH pick a vector + tool; ENTER drops SHIELD. Misses raise the ALARM",
 		"       (login lockout) -- max it and you're kicked. For logins, G sprays",

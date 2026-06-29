@@ -47,8 +47,23 @@ func attrFG(a uint16) int { return int(a>>7) & 0x1FF }
 func attrBG(a uint16) int { return int(a) & 0x0F }
 
 type cell struct {
-	ch   rune
-	attr uint16
+	ch    rune
+	attr  uint16
+	fgRGB uint32 // 0 = use palette attr; else rgbSet|0xRRGGBB (truecolor override)
+	bgRGB uint32 // 0 = use palette attr; else rgbSet|0xRRGGBB (truecolor override)
+}
+
+// rgbSet flags a colour token as a 24-bit truecolor override rather than a
+// palette index. The zero value (0) means "use the palette attribute", so every
+// existing Set/Fill/Print call (which leaves these fields zero) is unaffected.
+const rgbSet = 0x0100_0000
+
+// RGB packs a 24-bit colour into the token SetRGB expects.
+func RGB(r, g, b byte) uint32 { return rgbSet | uint32(r)<<16 | uint32(g)<<8 | uint32(b) }
+
+// RGBval extracts the (r,g,b) bytes from a colour token (set or not).
+func RGBval(token uint32) (r, g, b byte) {
+	return byte(token >> 16), byte(token >> 8), byte(token)
 }
 
 // Screen is a fixed-size cell grid.
@@ -102,6 +117,33 @@ func (s *Screen) Set(x, y int, ch rune, attr uint16) {
 	s.cur[y*s.W+x] = cell{ch: ch, attr: attr}
 }
 
+// SetRGB writes a cell with explicit 24-bit foreground/background colours
+// (truecolor), bypassing the 16-colour palette. Pass 0 for fgRGB or bgRGB to
+// fall back to the palette colour carried in attr. Honoured in truecolor mode
+// (the default) and in SVG export; in 16-colour mode the palette attr is used.
+func (s *Screen) SetRGB(x, y int, ch rune, attr uint16, fgRGB, bgRGB uint32) {
+	if x < 0 || y < 0 || x >= s.W || y >= s.H {
+		return
+	}
+	if ch == 0 {
+		ch = ' '
+	}
+	s.cur[y*s.W+x] = cell{ch: ch, attr: attr, fgRGB: fgRGB, bgRGB: bgRGB}
+}
+
+// OverlayFG tints a cell's background toward col, keeping its glyph and fore-
+// ground, so views can draw a crosshair/scan-line without clobbering data
+// underneath. Cells that already carry a truecolor background are left alone,
+// so open hits stay vivid.
+func (s *Screen) OverlayFG(x, y int, col uint32) {
+	if x < 0 || y < 0 || x >= s.W || y >= s.H {
+		return
+	}
+	if c := &s.cur[y*s.W+x]; c.bgRGB == 0 {
+		c.bgRGB = col
+	}
+}
+
 // Print writes a string starting at x,y, clipped to the row.
 func (s *Screen) Print(x, y int, attr uint16, str string) {
 	for _, r := range str {
@@ -130,7 +172,7 @@ func (s *Screen) Flush(w io.Writer) error {
 	var b bytes.Buffer
 	b.WriteString("\x1b[?25l") // hide cursor
 
-	lastAttr := uint16(0xFFFF)
+	last := style{attr: 0xFFFF} // impossible attr forces the first SGR
 	cursorX, cursorY := -1, -1
 
 	for y := 0; y < s.H; y++ {
@@ -146,9 +188,10 @@ func (s *Screen) Flush(w io.Writer) error {
 				b.WriteString(strconv.Itoa(x + 1))
 				b.WriteByte('H')
 			}
-			if s.cur[i].attr != lastAttr {
-				s.writeSGR(&b, s.cur[i].attr)
-				lastAttr = s.cur[i].attr
+			cs := style{attr: s.cur[i].attr, fg: s.cur[i].fgRGB, bg: s.cur[i].bgRGB}
+			if cs != last {
+				s.writeStyle(&b, cs)
+				last = cs
 			}
 			var tmp [4]byte
 			n := utf8.EncodeRune(tmp[:], s.cur[i].ch)
@@ -192,17 +235,17 @@ func (s *Screen) SVG() string {
 	for y := 0; y < s.H; y++ {
 		x := 0
 		for x < s.W {
-			bg := attrBG(s.cur[y*s.W+x].attr)
-			if bg == Black {
+			bg := bgHex(s.cur[y*s.W+x])
+			if bg == "#000000" {
 				x++
 				continue
 			}
 			run := 1
-			for x+run < s.W && attrBG(s.cur[y*s.W+x+run].attr) == bg {
+			for x+run < s.W && bgHex(s.cur[y*s.W+x+run]) == bg {
 				run++
 			}
 			fmt.Fprintf(&b, `<rect x="%d" y="%d" width="%d" height="%d" fill="%s"/>`,
-				x*cw, y*ch, run*cw, ch, hexColor(bg))
+				x*cw, y*ch, run*cw, ch, bg)
 			x += run
 		}
 	}
@@ -214,9 +257,8 @@ func (s *Screen) SVG() string {
 			if c.ch == ' ' || c.ch == 0 {
 				continue
 			}
-			fg := attrFG(c.attr) & 0x0F
 			fmt.Fprintf(&b, `<text x="%d" y="%d" fill="%s" text-anchor="middle">%s</text>`,
-				x*cw+cw/2, y*ch+fs-2, hexColor(fg), escapeXML(c.ch))
+				x*cw+cw/2, y*ch+fs-2, fgHex(c), escapeXML(c.ch))
 		}
 	}
 	b.WriteString(`</svg>`)
@@ -226,6 +268,22 @@ func (s *Screen) SVG() string {
 func hexColor(c int) string {
 	rgb := dosRGB[c&0x0F]
 	return fmt.Sprintf("#%02x%02x%02x", rgb[0], rgb[1], rgb[2])
+}
+
+// bgHex/fgHex resolve a cell's colour to a hex string for SVG, honouring any
+// 24-bit override and otherwise using the VGA palette.
+func bgHex(c cell) string {
+	if c.bgRGB&rgbSet != 0 {
+		return fmt.Sprintf("#%06x", c.bgRGB&0xFFFFFF)
+	}
+	return hexColor(attrBG(c.attr))
+}
+
+func fgHex(c cell) string {
+	if c.fgRGB&rgbSet != 0 {
+		return fmt.Sprintf("#%06x", c.fgRGB&0xFFFFFF)
+	}
+	return hexColor(attrFG(c.attr) & 0x0F)
 }
 
 func escapeXML(r rune) string {
@@ -248,9 +306,16 @@ func (s *Screen) Repaint() {
 	}
 }
 
-func (s *Screen) writeSGR(b *bytes.Buffer, attr uint16) {
-	fg := attrFG(attr)
-	bg := attrBG(attr)
+// style is the emitted appearance of a cell: its packed palette attr plus any
+// 24-bit RGB overrides. The flusher re-emits an SGR only when this changes.
+type style struct {
+	attr   uint16
+	fg, bg uint32
+}
+
+func (s *Screen) writeStyle(b *bytes.Buffer, st style) {
+	fg := attrFG(st.attr)
+	bg := attrBG(st.attr)
 	blink := fg&Blink != 0
 	fg &= 0x0F
 
@@ -259,20 +324,30 @@ func (s *Screen) writeSGR(b *bytes.Buffer, attr uint16) {
 		b.WriteString(";5")
 	}
 	if s.truecolor {
-		r, g, bl := dosRGB[fg][0], dosRGB[fg][1], dosRGB[fg][2]
+		fr, fgc, fb := resolveRGB(st.fg, fg)
 		b.WriteString(";38;2;")
-		writeByte3(b, r, g, bl)
-		r, g, bl = dosRGB[bg][0], dosRGB[bg][1], dosRGB[bg][2]
+		writeByte3(b, fr, fgc, fb)
+		br, bgc, bb := resolveRGB(st.bg, bg)
 		b.WriteString(";48;2;")
-		writeByte3(b, r, g, bl)
+		writeByte3(b, br, bgc, bb)
 	} else {
-		// 16-colour SGR: 30-37/90-97 fg, 40-47/100-107 bg.
+		// 16-colour SGR: 30-37/90-97 fg, 40-47/100-107 bg. RGB overrides ignored.
 		b.WriteByte(';')
 		b.WriteString(strconv.Itoa(ansiFG(fg)))
 		b.WriteByte(';')
 		b.WriteString(strconv.Itoa(ansiBG(bg)))
 	}
 	b.WriteByte('m')
+}
+
+// resolveRGB returns the 24-bit colour to emit: an explicit override token if
+// set, otherwise the VGA palette entry for the index.
+func resolveRGB(token uint32, idx int) (r, g, b byte) {
+	if token&rgbSet != 0 {
+		return byte(token >> 16), byte(token >> 8), byte(token)
+	}
+	p := dosRGB[idx&0x0F]
+	return p[0], p[1], p[2]
 }
 
 func writeByte3(b *bytes.Buffer, r, g, bl byte) {

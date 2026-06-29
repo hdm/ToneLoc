@@ -4,13 +4,17 @@
 > does is simple: it dials numbers, looking for some kind of tone."*
 > — Minor Threat & Mucho Maas, 1994
 
-**DARKCIDR** is a loving port of the legendary MS-DOS war-dialer **ToneLoc** to Go — but
-instead of dialing **telephone numbers** looking for carriers and tones, it
-"dials" **IPv4 addresses and ports** looking for open services, using the
-[`zmap-go`](https://github.com/hdm/zmap-go) scanner under the hood. The screen
-keeps the original's 90s DOS look: the **Activity Log**, **Modem**, and
-**Statistics** windows, the progress meter, the blinking status line — all of
-it. And there's a **web version** that renders in your browser through
+**DARKCIDR** is a fast, modern terminal **network discovery & analysis** tool wearing
+the skin of the legendary MS-DOS war-dialer **ToneLoc** — instead of dialing
+**telephone numbers** looking for carriers and tones, it "dials" **IPv4 addresses
+and ports** looking for open services, using the
+[`zmap-go`](https://github.com/hdm/zmap-go) scanner under the hood. It keeps the
+1994 DOS soul (CP437 box-drawing, the VGA palette, modem chatter) but elevates it:
+**full-screen, mode-switched views** — scrollable **per-host progress bars**, a
+**gap-free, zoomable truecolor heatmap** of the whole address space, the Services
+list and Hall of Fame — plus a **parallel scan engine** for genuinely fast real
+scans, and a **hacker game** you can drop into live (or replay from saved data).
+There's a **web version** that renders in your browser through
 [`ghostty.js`](https://github.com/coder/ghostty-web).
 
 The original C source (TONELOC.C, the CXL windowing library, the FOSSIL serial
@@ -90,12 +94,17 @@ darkcidr 203.0.113.X --web :9000         # serve the UI in a browser
   network, no external binary. This is what powers the web demo and lets the
   full DOS experience run for anyone, anywhere.
 * **`connect`** — a real TCP `connect()` scan via the Go runtime. Needs no
-  special privileges. Reads banners (→ tones).
-* **`zmap`** — drives the **real zmap scanner in-process** via the `zmap-go`
-  library (`tcp_synscan`: raw socket + SYN crafting + AES probe validation, no
-  subprocess). This is a raw-packet stateless mass scan, so it needs
-  `root`/`cap_net_raw` and a live network; if that's unavailable DARKCIDR
-  transparently falls back to the simulator.
+  special privileges. Reads banners (→ tones). **Sweeps many targets in parallel**
+  (`--concurrency N`, default 128) so a `/24` finishes in seconds, not minutes.
+* **`zmap`** *(the default when run as root)* — drives the **real zmap scanner
+  in-process** via the `zmap-go` library (`tcp_synscan`: raw socket + SYN crafting
+  + AES probe validation, no subprocess). This is a raw-packet **stateless mass
+  scan**: it blasts one SYN at every `(address, port)` and classifies the
+  validated replies, so it's *dramatically* faster than connect() for large or
+  filtered spaces. Results **stream live** — the map and host bars fill in real
+  time as SYN/ACKs arrive, and silent targets resolve to timeouts when the sweep
+  cools down. It needs `root`/`cap_net_raw` and a live network; if that's
+  unavailable DARKCIDR transparently falls back to connect, then the simulator.
 
 ### The recon pipeline (nerva + brutus)
 
@@ -139,9 +148,12 @@ darkcidr --restore <id>
 ### Default behaviour
 
 Run **`darkcidr`** with no arguments and it immediately enters full-screen
-terminal mode and sweeps **every local network** this machine is on — `zmap` if
-it can open raw sockets, otherwise `connect` — with **nerva** discovering UDP
-services and fingerprinting as it goes, common ports first.
+terminal mode and sweeps **every local network** this machine is on — the
+streaming `zmap` SYN scanner if it can open raw sockets, otherwise the parallel
+`connect` scan — with **nerva** discovering UDP services and fingerprinting as it
+goes, common ports first. A **given target also defaults to the SYN scanner when
+run as root** (`darkcidr 192.168.1.0/24` as root → `zmap`); unprivileged, an
+explicit target stays on the safe simulator unless you pass `--connect`.
 
 In every mode the **target ordering itself comes from zmap-go** — DARKCIDR
 walks the `(address, port)` space with zmap-go's cyclic multiplicative-group
@@ -149,14 +161,29 @@ iterator, the exact machinery the real scanner uses to permute the IPv4 space.
 It's a remarkably good fit for the original program's "never dial the same
 random number twice" promise.
 
-### Keys while dialing
+### Navigation
+
+Every view fills the whole terminal and shares a top **mode bar** so you always
+know where you are. Jump straight to a view with its number, or cycle with **M**/
+**TAB**:
 
 ```
-ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait
-N/C/F/G/V/Y annotate the current number
-M or TAB   cycle views: Dialer -> Map -> Hall of Fame -> Services
-in Services:  j/k or arrows select   ENTER detail   B run brutus
+1 Hosts   2 Map   3 Services   4 Hall of Fame   5 Dialer
+G  drop into the GAME (built from the live scan — the scan keeps running)
+ESC quit
 ```
+
+* **Hosts** *(the default)* — every scanned host on its own row with a per-host
+  **progress bar**: one coloured pip per port (█ open, █ banner, ▓ reset, ▒
+  filtered, ░ timeout, · pending). Sorted by IP, scrollable (**j/k**, **g/e**
+  top/end), **f** follows the live sweep, **ENTER** opens detail, **B** brutes.
+* **Map** — a full-screen, **gap-free truecolor heatmap** of the address space
+  (see below).
+* **Services / Hall of Fame** — selectable with **j/k**; **ENTER** for the full
+  detail card, **B** to run brutus.
+* **Dialer** — the classic 1994 three-window DOS dialer, kept for nostalgia.
+  While dialing: **SPACE** abort · **P** pause · **R** redial · **S** speaker ·
+  **X** +5s wait · **N/C/F/G/V/Y** annotate.
 
 ### Hall of Fame
 
@@ -166,18 +193,18 @@ scrollable with **j/k** or the arrow keys.
 
 ### Map
 
-Press **M** (or **Tab**) to flip from the dialer to the **network Map** — a homage to
-the original `TONEMAP.EXE`. It draws the entire scan space as a dense grid, one
-cell per address (auto-downsampled for big ranges), coloured by the most
-interesting verdict found there:
+Press **2** (or cycle with **M**) for the **network Map** — a modern take on the
+original `TONEMAP.EXE`. It paints the **entire** scan space as a **gap-free,
+edge-to-edge truecolor heatmap** that fills the whole terminal: each character
+cell packs two addresses (half-block rendering), coloured by the best verdict
+found there, with open **density glowing** on a green→cyan→white heat ramp.
 
-```
-█ Carrier   █ Tone   ▓ Busy   ▓ Voice   ▒ No Dialtone   ▒ Ringout   ░ Timeout   · Undialed
-```
-
-A large arrow cursor follows your **mouse** (or the **arrow keys** / **hjkl**),
-and the address and verdict under it are shown at the bottom — mouse reporting
-works the same in a real terminal and in the ghostty.js web view.
+It **zooms**: **+/-** zoom in and out (whole network → /16 → /24 → host), the
+**arrow keys / hjkl** (or **mouse drag / scroll-wheel**) pan, **ENTER** drills
+into the block under the cursor, and **a** fits the whole network back. A live
+**Inspect** panel shows the address (or block) under the cursor with its verdict
+and any services found there; **p** toggles it. Mouse reporting works the same in
+a real terminal and in the ghostty.js web view.
 
 ### Resuming scans (.DAT files)
 
@@ -270,9 +297,17 @@ MAINFRAME.)
 ./darkcidr --game 192.168.1.X           # build the world from a scan of this range
 ./darkcidr --game --zmap                # use the raw-socket SYN scanner (root)
 ./darkcidr --game --sim                 # play the embedded sample world instead
+./darkcidr --game --restore <id>        # build the world from a SAVED SESSION (no scan)
 ./darkcidr --game --hard                # faster trace, more traps, no free exploits
 ./darkcidr --game :8090                 # serve the SAME game to a browser
 ```
+
+You don't have to start in the game: run a normal scan and press **G** at any
+time to **drop into the game built from what you've found so far** — the scan
+keeps running in the background, and quitting the game drops you right back into
+the scanner. And with **`--game --restore <id>`** you can replay any saved
+session's world with no network access at all — exactly the "play off session
+data" path for folks who want the game without scanning.
 
 **Depth.** `--easy` / `--hard` tune the trace speed, honeypot density, and your
 starting exploits. Owning a **gateway** buys *internal trust* — every host behind

@@ -10,13 +10,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
-	"crypto/tls"
 	_ "embed"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strconv"
 	"sync"
@@ -65,9 +65,9 @@ func Serve(opts Options, job engine.Job) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(indexHTML)
 	})
-	mux.Handle("/ws", websocket.Handler(func(conn *websocket.Conn) {
+	mux.Handle("/ws", originGuard(websocket.Handler(func(conn *websocket.Conn) {
 		serveSession(conn, job)
-	}))
+	})))
 	mux.HandleFunc("/save", handleSave)
 	mux.HandleFunc("/load", handleLoad)
 
@@ -90,9 +90,9 @@ func ServeGame(opts Options, seed *game.Seed) error {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(gameHTML)
 	})
-	mux.Handle("/ws", websocket.Handler(func(conn *websocket.Conn) {
+	mux.Handle("/ws", originGuard(websocket.Handler(func(conn *websocket.Conn) {
 		serveGameSession(conn, seed)
-	}))
+	})))
 	fmt.Println("(serving DARKCIDR -- the terminal game -- over ghostty.js)")
 	return listen(opts, mux, "game")
 }
@@ -172,18 +172,6 @@ func listen(opts Options, mux http.Handler, label string) error {
 	}
 }
 
-var _ = tls.VersionTLS12
-
-func maskLabel(job engine.Job) string {
-	if job.Mask != nil {
-		return job.Mask.Text()
-	}
-	if len(job.Masks) > 0 {
-		return fmt.Sprintf("%s (+%d more)", job.Masks[0].Text(), len(job.Masks)-1)
-	}
-	return "?"
-}
-
 // handleSave streams the session's current .DAT state as a download.
 func handleSave(w http.ResponseWriter, r *http.Request) {
 	v, ok := sessions.Load(r.URL.Query().Get("s"))
@@ -226,6 +214,31 @@ func newSessionID() string {
 	var b [8]byte
 	rand.Read(b[:])
 	return hex.EncodeToString(b[:])
+}
+
+func maskLabel(job engine.Job) string {
+	if job.Mask != nil {
+		return job.Mask.Text()
+	}
+	if len(job.Masks) > 0 {
+		return fmt.Sprintf("%s (+%d more)", job.Masks[0].Text(), len(job.Masks)-1)
+	}
+	return "?"
+}
+
+// originGuard rejects cross-origin WebSocket handshakes: a connecting page must
+// share our host (or send no Origin, e.g. native clients). Blocks CSWSH when the
+// UI is exposed beyond localhost; same-origin browsers are unaffected.
+func originGuard(h http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if o := r.Header.Get("Origin"); o != "" {
+			if u, err := url.Parse(o); err != nil || u.Host != r.Host {
+				http.Error(w, "forbidden origin", http.StatusForbidden)
+				return
+			}
+		}
+		h.ServeHTTP(w, r)
+	})
 }
 
 func serveSession(conn *websocket.Conn, job engine.Job) {

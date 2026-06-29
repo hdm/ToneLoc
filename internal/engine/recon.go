@@ -23,7 +23,7 @@ func (e *Engine) onOpenTCP(res Result) {
 // fingerprint asks nerva what is running on a port and folds the answer back
 // into the service.
 func (e *Engine) fingerprint(key, ip string, port uint16) {
-	fp, ok := e.toolkit.Finger.Fingerprint(e.bgCtx, ip, port)
+	fp, ok := e.toolkit.Finger.Fingerprint(e.ctxBG(), ip, port)
 	if !ok {
 		return
 	}
@@ -99,7 +99,7 @@ func (e *Engine) StartBrute(key string) {
 	if !start {
 		return
 	}
-	ctx, cancel := context.WithCancel(e.bgCtx)
+	ctx, cancel := context.WithCancel(e.ctxBG())
 	e.bruteMu.Lock()
 	if e.bruteCancels == nil {
 		e.bruteCancels = map[string]context.CancelFunc{}

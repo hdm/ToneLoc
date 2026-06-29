@@ -75,6 +75,21 @@ func run(args []string) error {
 	if addr, explicit, ok := gameFlag(args); ok {
 		cliGame := !explicit && term.IsTerminal(int(os.Stdin.Fd()))
 		diff := gameDifficulty(args)
+
+		// --game --restore <id>: build the game world from a SAVED SESSION's
+		// discovered services and play it -- no scanning at all.
+		if id, has := restoreFlag(args); has {
+			seed, err := seedFromSession(id)
+			if err != nil {
+				return err
+			}
+			if cliGame {
+				return runTerminalGame(seed, diff)
+			}
+			tls, domain, cert, key := tlsFlagsFromArgs(args)
+			return web.ServeGame(buildOptions(addr, ":8090", tls, domain, cert, key), seed)
+		}
+
 		if cliGame && !wantsSim(args) {
 			if err := runRealGame(gameRealBackend(args), gameTarget(args), diff); err != nil {
 				fmt.Fprintln(os.Stderr, "game: "+err.Error())
@@ -169,6 +184,7 @@ func parseArgs(args []string) (options, error) {
 	var rangeText string
 	var excludeTexts []string
 	portsSet := false
+	backendSet := false
 
 	i := 0
 	for i < len(args) {
@@ -225,12 +241,16 @@ func parseArgs(args []string) (options, error) {
 					return opt, fmt.Errorf("--backend must be sim, connect or zmap")
 				}
 				j.Backend = v
+				backendSet = true
 			case "sim":
 				j.Backend = "sim"
+				backendSet = true
 			case "connect":
 				j.Backend = "connect"
+				backendSet = true
 			case "zmap":
 				j.Backend = "zmap"
+				backendSet = true
 			case "seed":
 				v, err := needVal()
 				if err != nil {
@@ -271,6 +291,16 @@ func parseArgs(args []string) (options, error) {
 					return opt, fmt.Errorf("invalid --limit %q", v)
 				}
 				j.Limit = n
+			case "concurrency", "workers":
+				v, err := needVal()
+				if err != nil {
+					return opt, err
+				}
+				n, err := strconv.Atoi(v)
+				if err != nil || n < 1 {
+					return opt, fmt.Errorf("invalid --concurrency %q (want >= 1)", v)
+				}
+				j.Concurrency = n
 			case "ports":
 				v, err := needVal()
 				if err != nil {
@@ -368,6 +398,15 @@ func parseArgs(args []string) (options, error) {
 		j.Excludes = append(j.Excludes, em)
 	}
 	_ = portsSet
+
+	// With no explicit backend, a privileged run defaults to the real zmap-go SYN
+	// scanner (this is a network-discovery tool, and root means we can use raw
+	// sockets). Unprivileged runs keep the safe simulator default -- opt into a
+	// real scan with --connect (or --zmap, which needs root).
+	if !backendSet && os.Geteuid() == 0 {
+		j.Backend = "zmap"
+	}
+
 	return opt, nil
 }
 
@@ -677,6 +716,36 @@ func restoreFlag(args []string) (string, bool) {
 	return "", false
 }
 
+// seedFromSession builds a game world from the services a saved session
+// discovered, so `--game --restore <id>` can be played with no live scanning.
+func seedFromSession(id string) (*game.Seed, error) {
+	sess, err := engine.LoadSession(id)
+	if err != nil {
+		return nil, fmt.Errorf("restore %s: %w", id, err)
+	}
+	if len(sess.Services) == 0 {
+		return nil, fmt.Errorf("session %s has no discovered services to build a game from", id)
+	}
+	svcs := make([]game.SeedService, 0, len(sess.Services))
+	for _, sv := range sess.Services {
+		name := sv.App
+		if name == "" {
+			name = appForGamePort(sv.Port)
+		}
+		banner := sv.Banner
+		if banner == "" {
+			banner = sv.ConnectBanner
+		}
+		svcs = append(svcs, game.SeedService{IP: sv.IP, Port: int(sv.Port), Svc: name, Banner: banner})
+	}
+	mask := ""
+	if len(sess.Masks) > 0 {
+		mask = sess.Masks[0]
+	}
+	fmt.Fprintf(os.Stderr, "Building game world from session %s -- %d service(s)...\n", id, len(svcs))
+	return game.NewSeed(mask, svcs), nil
+}
+
 // runRestore resumes a scan from its session log.
 func runRestore(id string) error {
 	sess, err := engine.LoadSession(id)
@@ -895,14 +964,19 @@ OPTIONS:
   /p:23,80,443       ports to dial on each address (default 23)
 
 FLAGS:
-  --backend sim|connect|zmap   scan backend (default sim)
+  --backend sim|connect|zmap   scan backend (default: sim; zmap when run as root)
   --sim --connect --zmap       shorthands for --backend
+                               zmap = real zmap-go stateless SYN scan (needs root)
+                               that STREAMS results live; connect = parallel TCP
+                               connect() (no privileges); sim = offline simulator
   --nerva / --no-nerva         nerva UDP + fingerprinting (default ON)
   --brutus / --no-brutus       brutus credential testing (default OFF; ON in sim)
   --wait 4s                    listen time per dial (the meter length)
   --rings 6                    rings before Ringout
   --seed N                     reproducible scan order (0 = random)
   --limit N                    stop after N dials
+  --concurrency N              probe N targets at once (default: 128 for the
+                               connect backend -- fast real scans; 1 for sim/zmap)
   --web [addr]                 serve the UI in a browser (ghostty.js), default :8080
   --game [addr]                play TONESTORM, filling the terminal on a TTY (or
                                serve the browser version if given an address).
@@ -910,7 +984,10 @@ FLAGS:
                                connect scan of your network (a target, or the
                                local nets), e.g. darkcidr --game 192.168.1.X
                                (--zmap = raw SYN scan, needs root). Pass --sim to
-                               play the embedded sample world.
+                               play the embedded sample world, or --game --restore
+                               <id> to build the world from a SAVED SESSION (no
+                               scan). You can also drop into the game live from
+                               the scanner UI by pressing G.
   --easy / --hard              game difficulty (trace speed, traps, starting
                                exploits); default normal
   --tls                        serve HTTPS; issues an ACME cert for --domain
@@ -932,20 +1009,25 @@ RECON PIPELINE:
   marks the service compromised if it gets in. Everything is written to a
   resumable session log (--restore <id>).
 
-KEYS WHILE DIALING:
-  ESC quit   SPACE abort   P pause   R redial   S speaker   X +5s wait
-  N/C/F/G/V/Y annotate the current number
-  M or TAB   cycle views: Dialer -> ToneMap -> Hall of Fame -> Services
+NAVIGATION (every view fills the whole terminal):
+  1 Hosts   2 Map   3 Services   4 Hall of Fame   5 Dialer    (M or TAB cycles)
+  G         drop into the GAME, built from the live scan (the scan keeps running)
+  ESC       quit
 
 VIEWS:
-  ToneMap       a grid of the whole scan coloured by result; hover with the
-                mouse (or move with the arrow keys / hjkl) and the cell's
-                address + verdict show at the bottom.
-  Hall of Fame  every carrier and tone found, selectable (j/k); ENTER opens its
-                service detail, B brutes it.
-  Services      every TCP/UDP service found; select (j/k), ENTER for the full
+  Hosts (1)     the default: every scanned host on its own row with a per-port
+                progress bar -- a coloured pip per port (open/banner/reset/
+                filtered/timeout/pending) -- sorted by IP, scrollable (j/k, g/e),
+                f follows the live sweep, ENTER opens detail, B brutes.
+  Map (2)       a full-screen, gap-free truecolor heatmap of the address space.
+                +/- zoom in/out, arrows/hjkl (or mouse drag/wheel) pan, ENTER
+                drills in, a fits the whole net, p toggles the inspect panel.
+  Services (3)  every TCP/UDP service found; select (j/k), ENTER for the full
                 detail (connect banner, nerva fingerprint, brutus creds), B to
                 run brutus.
+  Hall (4)      every carrier and tone found, selectable (j/k); ENTER opens its
+                service detail, B brutes it.
+  Dialer (5)    the classic 1994 three-window DOS dialer, for old times' sake.
 
 In the web (--web) version the Speaker toggle (S) drives synthesized modem
 audio: dial tones, busy signals, and the handshake screech on a carrier.

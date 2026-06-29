@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"net/netip"
 	"sort"
 	"sync"
 	"time"
@@ -175,6 +176,34 @@ func (s *State) HostScansSnapshot(max int) []HostScan {
 		})
 	}
 	return out
+}
+
+// HostScansByAddr returns every touched host's scan row sorted by IP address
+// ascending -- the stable order the full-screen hosts view scrolls through.
+func (s *State) HostScansByAddr() []HostScan {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]HostScan, 0, len(s.hostOrder))
+	for _, ip := range s.hostOrder {
+		hp := s.hostProg[ip]
+		out = append(out, HostScan{
+			IP: hp.ip, Ports: append([]uint8(nil), hp.ports...),
+			Open: hp.open, Banner: hp.banner, Seq: hp.seq,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool { return lessIP(out[i].IP, out[j].IP) })
+	return out
+}
+
+// lessIP orders two IP strings numerically (ascending); unparseable addresses
+// fall back to lexical order.
+func lessIP(a, b string) bool {
+	aa, ea := netip.ParseAddr(a)
+	bb, eb := netip.ParseAddr(b)
+	if ea != nil || eb != nil {
+		return a < b
+	}
+	return aa.Less(bb)
 }
 
 // HostVerdicts returns each scanned IP's single best (highest-priority) Response
@@ -389,6 +418,66 @@ func (s *State) RenderTone(cols, rows int) (cells []uint8, perCell int) {
 		cells[c] = best
 	}
 	return cells, perCell
+}
+
+// RenderToneWindow downsamples a CONTIGUOUS WINDOW [start, start+count) of the
+// verdict grid into a cols x rows block, for the zoomable map. For each output
+// cell it returns the highest-priority verdict among the addresses it covers
+// (cells) and how many of those were a hit/open (open), so the renderer can both
+// colour by verdict and shade by open density. perCell is how many addresses each
+// cell represents (>=1). A zero/oversized window is clamped to the grid.
+func (s *State) RenderToneWindow(start, count, cols, rows int) (cells []uint8, open []uint16, perCell int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if cols < 1 || rows < 1 || s.toneSpan == 0 {
+		return nil, nil, 1
+	}
+	if start < 0 {
+		start = 0
+	}
+	if start >= s.toneSpan {
+		start = s.toneSpan - 1
+	}
+	if count <= 0 || start+count > s.toneSpan {
+		count = s.toneSpan - start
+	}
+	total := cols * rows
+	perCell = count / total
+	if perCell < 1 {
+		perCell = 1
+	}
+	cells = make([]uint8, total)
+	open = make([]uint16, total)
+	// Proportional mapping fills EVERY output cell: when count >= total each cell
+	// covers ~count/total addresses (downsample); when count < total consecutive
+	// cells map to the same address (upscale), so a deep zoom still fills the grid
+	// edge-to-edge with no gaps.
+	for c := 0; c < total; c++ {
+		lo := start + c*count/total
+		hi := start + (c+1)*count/total
+		if hi <= lo {
+			hi = lo + 1
+		}
+		if hi > s.toneSpan {
+			hi = s.toneSpan
+		}
+		best := uint8(RespUndialed)
+		bestP := -1
+		oc := 0
+		for i := lo; i < hi; i++ {
+			r := Response(s.tone[i])
+			if r.Found() {
+				oc++
+			}
+			if p := r.Priority(); p > bestP {
+				bestP = p
+				best = s.tone[i]
+			}
+		}
+		cells[c] = best
+		open[c] = uint16(oc)
+	}
+	return cells, open, perCell
 }
 
 // ring is a fixed-capacity line buffer (the windows scroll).

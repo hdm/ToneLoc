@@ -23,6 +23,12 @@ type Job struct {
 	SessionID string        // resume an existing session log (else a new id)
 	Resume    bool          // resume from the .DAT (skip already-dialed); default off
 
+	// Concurrency bounds how many targets are probed at once. 0 = auto: the
+	// privilege-free connect backend sweeps in parallel (fast real scans), while
+	// sim/zmap stay serial (sim animates one dial at a time; zmap is already a
+	// batched pre-sweep). >1 forces the parallel sweep path on any backend.
+	Concurrency int
+
 	// Recon tool toggles. nerva (UDP + fingerprinting) is on by default; brutus
 	// (credential testing) is off by default except in sim mode -- you opt in to
 	// hammering real services. The No* flags force-disable.

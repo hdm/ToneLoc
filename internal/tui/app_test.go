@@ -27,6 +27,7 @@ func TestFrameLayout(t *testing.T) {
 	time.Sleep(1500 * time.Millisecond)
 
 	app := New(eng, nil)
+	app.setMode(modeDialer) // this test asserts the classic 3-window layout
 	frame := app.Frame()
 	lines := strings.Split(strings.TrimRight(frame, "\n"), "\n")
 	if len(lines) != app.scr.H {
